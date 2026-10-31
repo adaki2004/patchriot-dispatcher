@@ -12,7 +12,7 @@ The private Rust service for approving review scope, pairing machines, assigning
 
 The services may share one Postgres installation with separate schemas and restricted roles. A payment credit and its outgoing event are saved together in core. Dispatcher consumption is idempotent; accepted work emits a similarly durable event back. A dispatcher result cannot credit money or select its reward. No broker is needed for the MVP.
 
-Keep this repository private initially to limit exposure of changing abuse rules, screening rubrics and operational procedures. Deterministic controls must still hold if that code becomes known. Private source is not the prompt-injection defense. Judges may be granted private evaluation access; public release remains an owner decision, and hackathon eligibility is not established by offering access.
+Keep this repository private initially to limit exposure of changing abuse rules, screening rubrics and operational procedures. Deterministic controls must still hold if that code becomes known. Private source is not the prompt-injection defense. Source access for evaluation is available on request.
 
 ## Admission and private access
 
@@ -22,7 +22,9 @@ For private pilot repositories, GitHub user `adaki2004` receives minimum access 
 
 Every source, progress, log, report and download checks requester/job access. Payment senders do not automatically become report owners. Keep private responses out of shared caches and analytics. Escape report text and sanitize any permitted Markdown. A timeout is an explicit error, never a fabricated empty list or missing job.
 
-Website checks are a later passive-only scope requiring domain control. Enforce destinations at connection time and after redirects, including IPv6, DNS rebinding, loopback, private networks and metadata services. A link to another origin grants no permission to test it.
+Website reviews inspect scripts and external requests, security headers, TLS and DNS configuration. Additional active checks require verified authority and explicit scope: allowed hosts, paths, actions, test accounts, request rates and time limits. Start with owned website fixtures, then approved targets; prefer staging for non-destructive input and access-control tests. A suspicious script or DNS observation is a finding to investigate, not automatic proof of compromise.
+
+Enforce destinations at connection time and after redirects, including IPv6, DNS rebinding, loopback, private networks and metadata services. Reading or displaying DNS answers must not authorize connecting to prohibited addresses. Block out-of-scope third-party services even when the target links to them. Capture browser behavior in a fresh isolated profile with approved session credentials only; do not load personal cookies. The initial active-check scope excludes destructive actions and extraction of customer data. Store supported probe limits in the admission and quote; agents cannot broaden them while working.
 
 ## Screening and execution
 
@@ -74,4 +76,4 @@ Required checks: cross-account reads; revoked devices; replayed and stale result
 
 Core contains payment/reconciliation implementation and tests. This service consumes only authenticated funding state and emits accepted-work records; financial amounts and withdrawals remain core's responsibility. Deployment requires valid configuration and separate authorization; lack of keys must never enable permissive production behavior.
 
-See [LICENSE](LICENSE) for the private source policy and [NOTICE](NOTICE) for attribution. No publication or hackathon eligibility approval is implied by this repository.
+See [LICENSE](LICENSE) for the private source policy and [NOTICE](NOTICE) for attribution.

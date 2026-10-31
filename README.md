@@ -2,9 +2,31 @@
 
 The private Rust service for approving review scope, pairing machines, assigning work, checking findings and delivering private evidence.
 
-**Status:** repository foundation and design only. No server, migrations, pairing endpoint or review runner is implemented yet. Use one modular service, Postgres and private artifact storage; add processes only when isolation or scheduling needs them.
+**Status:** the Rust device-onboarding service is implemented: signed pairing, PostgreSQL persistence, operator claims, separate admin approval, presence, pause and revocation. Work dispatch, model execution and private review delivery remain planned. Use one modular service, Postgres and private artifact storage; add processes only when isolation or scheduling needs them.
 
 **DON'T TRUST! VERIFY!** Inspect implementation and test evidence. Private source, a signed result or an agent's confidence is not a security guarantee.
+
+## Run device onboarding
+
+Place `patchriot-core` beside this repository; its Apache-2.0 protocol crate provides the shared DTOs and signature checks. Set `DATABASE_URL`, `PATCHRIOT_INTERNAL_KEY` (a generated secret of at least 32 bytes) and `PATCHRIOT_AUDIENCE` (a stable identifier for this deployment), then run `cargo run --locked`. The listener defaults to `127.0.0.1:7411`; `PATCHRIOT_BIND` can change it for a configured deployment. Migrations are embedded in the binary. Use a dedicated database for the prototype.
+
+Device requests are signed with Ed25519 and bind the deployment, path, timestamp and exact typed payload. Five-minute pairing codes are claimed once. A claim creates a pending device; only an admin may approve it. The signed heartbeat counter is persisted, conflicting/stale counters are rejected, and exact retries do not refresh liveness. A device becomes offline after 30 seconds without a fresh heartbeat. Revocation rejects further heartbeats and cannot be undone for that key.
+
+| Route | Caller and purpose |
+| --- | --- |
+| `POST /v1/pairings/start` | Device proof; bounded, retryable pairing admission |
+| `POST /v1/pairings/status` | Same device key; check claim result |
+| `POST /v1/devices/:id/heartbeat` | Paired device proof; presence, pause and sequence |
+| `GET /v1/fleet` | Public aggregate of online devices, operators and declared compute groups |
+| `POST /internal/pairings/claim` | Authenticated core account; accept a code and operator profile |
+| `GET /internal/devices` | Core account sees its devices; admin sees the fleet |
+| `POST /internal/devices/:id/decision` | Admin approves/revokes; owner may revoke their own device |
+
+Internal requests require `Authorization: Bearer <service secret>`, `X-Patchriot-Account` and `X-Patchriot-Role` (`member` or `admin`). Core must construct these from its authenticated session. Do not put the service secret in the browser or forward browser-supplied identity headers. HTTPS or a private authenticated tunnel is required outside loopback. The current API does not authorize customer execution merely because a device is online or approved.
+
+For tests, set `PATCHRIOT_TEST_DATABASE_URL` to a local PostgreSQL database where the test role can create schemas, then run `cargo test --locked --all-targets`. Tests use distinct generated schemas and remove them after success. They exercise simultaneous claims, approval/revocation, signature and account boundaries, heartbeat replays, expiry and anonymous admission limits. `cargo fmt --all --check` and `cargo clippy --locked --all-targets -- -D warnings` complete the local checks. The core smoke script runs three real relay instances through this API without calling a model.
+
+CI uses a disposable PostgreSQL service and a pinned core protocol commit. If core is private, set the `PATCHRIOT_READ_TOKEN` repository secret to a token with read-only access to core; the default GitHub token can read a public core repository.
 
 ## Service boundary
 

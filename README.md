@@ -5,7 +5,7 @@ The private Rust service that pairs devices, controls admission and assigns Patc
 
 > **DON'T TRUST! VERIFY!** Audit the implementation and test its permission boundaries. Use authorized penetration tests against your own deployment. Private source, signed results and model confidence do not establish security.
 
-**Working today:** persistent onboarding, owned example checks, approved website snapshots and explicitly shared offline agent reviews. Internal admission can hold an agreed review until core confirms payment. Reports separate tool observations from model claims. Active target testing and browser checkout are not enabled.
+**Working today:** persistent onboarding, owned example checks, approved website snapshots and explicitly shared offline agent reviews. Internal admission can hold an agreed review until core confirms payment. Reports separate tool observations from model claims. Core provides configurable browser checkout; active target testing is not enabled.
 
 ## Run locally
 
@@ -94,7 +94,7 @@ Core can call `admit-review` with the requester's `consent`, a server-selected `
 
 After recording a matching settlement, core calls `fund` with `request_id`, `invoice_id` and the saved `price`. The dispatcher rechecks the agents, consent and retained snapshot, then starts the review deadline using its saved time budget. Repeated delivery acknowledges the same activation; one invoice cannot fund two reviews. Cancellation, expiry or removed approval prevents activation. Core retains responsibility for customer balances and refunds when work cannot start.
 
-These routes require the internal service credential and paying account. They do not accept a browser's payment claim or verify a blockchain transaction themselves. The browser's free pilot remains available; core must restrict that path when enabling paid checkout. Core implements quote preparation and funding-event delivery; browser checkout and refunds remain separate integration steps.
+These routes require the internal service credential and paying account. They do not accept a browser's payment claim or verify a blockchain transaction themselves. Core's configured paid mode restricts the free path and handles browser checkout, quote preparation and funding-event delivery. Refund execution remains separate.
 
 ## Boundaries that matter
 
@@ -119,6 +119,8 @@ Capture comparisons read both retained snapshots under the caller's permissions 
 1. An admin grants **private-work approval** to a Hermes device, with a recorded reason. Existing demo approvals do not qualify.
 2. Its signed poll explicitly declares `website_reviews: true`. Older polls retain their signature format and receive only demo work.
 3. The snapshot owner consents to three exact device IDs, ordered investigator/reproducer/challenger, and the saved snapshot SHA-256. Operator, model and compute-group declarations are recorded with consent.
+
+Selection, admission and payment activation require a fresh work poll within 30 seconds or a current, unexpired assignment. Heartbeats alone and replayed polls do not renew work availability. A busy agent stays eligible while renewing its lease; a relay restarted in presence-only mode ages out of the selection list. After migration, idle devices need one fresh poll before selection; existing signed request formats are unchanged.
 
 Roles stay pinned to those devices. No fallback operator receives the data. Only a live assigned lease can download the original snapshot and preceding reports; cancellation, expiry and revocation stop downloads and renewals. Paused or stale devices cannot read evidence. Removing private approval fails active reviews involving that device. Data already received cannot be recalled.
 

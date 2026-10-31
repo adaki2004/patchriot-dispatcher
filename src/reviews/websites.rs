@@ -32,7 +32,9 @@ pub(super) async fn candidates(
 ) -> Result<Vec<WebsiteReviewer>, ApiError> {
     // Introductions are immutable after pairing. A signed poll declares support
     // for this task, separately from staff approval and requester consent.
-    let rows = sqlx::query_as::<_, Candidate>("SELECT d.id, d.operator_id, o.display_name AS operator_name, d.introduction FROM devices d JOIN operators o ON o.id = d.operator_id WHERE d.approval = 'approved' AND d.private_work_approved AND d.website_reviews AND NOT d.paused AND d.last_seen_at > now() - interval '30 seconds' AND d.introduction->>'runtime' = 'hermes' AND ($1::uuid[] IS NULL OR d.id = ANY($1)) ORDER BY d.created_at, d.id LIMIT 30 FOR UPDATE OF d")
+    // Presence-only restarts must not retain work availability forever. Busy
+    // agents renew a live lease instead of polling while they execute a task.
+    let rows = sqlx::query_as::<_, Candidate>("SELECT d.id, d.operator_id, o.display_name AS operator_name, d.introduction FROM devices d JOIN operators o ON o.id = d.operator_id WHERE d.approval = 'approved' AND d.private_work_approved AND d.website_reviews AND NOT d.paused AND d.last_seen_at > now() - interval '30 seconds' AND (d.work_polled_at > now() - interval '30 seconds' OR EXISTS (SELECT 1 FROM work_leases l WHERE l.device_id = d.id AND l.state = 'active' AND l.expires_at > now() AND l.deadline_at > now())) AND d.introduction->>'runtime' = 'hermes' AND ($1::uuid[] IS NULL OR d.id = ANY($1)) ORDER BY d.created_at, d.id LIMIT 30 FOR UPDATE OF d")
         .bind(ids).fetch_all(&mut **tx).await?;
     Ok(rows.into_iter().map(Candidate::disclosure).collect())
 }

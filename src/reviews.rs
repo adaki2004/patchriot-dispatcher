@@ -410,7 +410,7 @@ pub async fn poll(
         }
     }
     let reply = WorkReply { assignment };
-    sqlx::query("UPDATE devices SET work_sequence = $1, work_reply = $2, website_reviews = $4 WHERE id = $3")
+    sqlx::query("UPDATE devices SET work_sequence = $1, work_reply = $2, website_reviews = $4, work_polled_at = now() WHERE id = $3")
         .bind(seq as i64)
         .bind(DbJson(&reply))
         .bind(id)

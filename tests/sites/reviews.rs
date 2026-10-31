@@ -2,6 +2,8 @@ use super::*;
 use patchriot_protocol::{website_reviews::*, websites::WebsiteSnapshot};
 use sqlx::types::Json as DbJson;
 
+#[path = "availability.rs"]
+mod availability;
 #[path = "funding.rs"]
 mod funding;
 

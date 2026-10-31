@@ -2,6 +2,9 @@ use super::*;
 use patchriot_protocol::{website_reviews::*, websites::WebsiteSnapshot};
 use sqlx::types::Json as DbJson;
 
+#[path = "funding.rs"]
+mod funding;
+
 async fn saved_site(app: &TestApp) -> (Uuid, WebsiteSnapshot) {
     let input = json!({"request_id":Uuid::new_v4(),"scope":{"homepage":"https://example.com/","script_origins":[]},"authorized":true,"authority_note":"I operate this owned fixture website."});
     let response = app

@@ -84,6 +84,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/internal/reviews/{id}", get(reviews::get))
         .route("/internal/reviews/{id}/cancel", post(reviews::cancel))
+        .route("/internal/reviews/{id}/fund", post(reviews::funding::fund))
         .route(
             "/internal/site-checks",
             get(websites::list).post(websites::create),
@@ -105,6 +106,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/internal/site-checks/{id}/review",
             post(reviews::websites::create),
+        )
+        .route(
+            "/internal/site-checks/{id}/admit-review",
+            post(reviews::funding::admit),
         )
         .route(
             "/internal/site-checks/{id}/evidence",

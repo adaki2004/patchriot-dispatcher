@@ -26,7 +26,7 @@ impl Candidate {
     }
 }
 
-async fn candidates(
+pub(super) async fn candidates(
     tx: &mut Tx<'_>,
     ids: Option<&[Uuid]>,
 ) -> Result<Vec<WebsiteReviewer>, ApiError> {
@@ -72,6 +72,18 @@ pub(crate) async fn create(
     Json(input): Json<CreateWebsiteReview>,
 ) -> Result<Json<ReviewView>, ApiError> {
     let caller = actor(&headers, &state)?;
+    Ok(Json(
+        create_review(&state, &caller, site_id, input, None).await?,
+    ))
+}
+
+pub(super) async fn create_review(
+    state: &AppState,
+    caller: &Actor,
+    site_id: Uuid,
+    input: CreateWebsiteReview,
+    payment: Option<(ReviewPrice, i64)>,
+) -> Result<ReviewView, ApiError> {
     if !input.accepts_operator_access
         || input.device_ids.len() != 3
         || input.device_ids.iter().collect::<HashSet<_>>().len() != 3
@@ -81,15 +93,15 @@ pub(crate) async fn create(
     let mut tx = state.pool.begin().await?;
     scheduler(&mut tx).await?;
     sweep(&mut tx).await?;
-    let existing: Option<(Uuid, Option<DbJson<WebsiteReviewContext>>)> = sqlx::query_as(
-        "SELECT id, website_context FROM reviews WHERE requester_id = $1 AND request_id = $2",
+    let existing: Option<ReviewRow> = sqlx::query_as(
+        "SELECT id, request_id, state, mode, scenario, website_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at FROM reviews WHERE requester_id = $1 AND request_id = $2",
     )
     .bind(caller.id)
     .bind(input.request_id)
     .fetch_optional(&mut *tx)
     .await?;
-    if let Some((id, context)) = existing {
-        let same = context.is_some_and(|context| {
+    if let Some(existing) = existing {
+        let same = existing.website_context.is_some_and(|context| {
             context.site_check_id == site_id
                 && context.snapshot_sha256 == input.snapshot_sha256
                 && context
@@ -99,20 +111,35 @@ pub(crate) async fn create(
                     .collect::<Vec<_>>()
                     == input.device_ids
         });
-        if !same {
+        let same_payment = existing.payment_terms.map(|terms| terms.0)
+            == payment.as_ref().map(|(price, _)| price.clone())
+            && existing.payment_expires_at.map(|time| time.timestamp())
+                == payment.as_ref().map(|(_, expires)| *expires);
+        if !same || !same_payment {
             return Err(ApiError::conflict("conflicting_review_request"));
         }
         tx.commit().await?;
-        return Ok(Json(view(&state.pool, &caller, id).await?));
+        return view(&state.pool, caller, existing.id).await;
     }
+    let payment_deadline = match &payment {
+        Some((price, expires)) if price.valid() && *expires > now() && *expires <= now() + 3600 => {
+            Some(
+                DateTime::from_timestamp(*expires, 0)
+                    .ok_or_else(|| ApiError::bad("invalid_payment_terms"))?,
+            )
+        }
+        Some(_) => return Err(ApiError::bad("invalid_payment_terms")),
+        None => None,
+    };
+    let retained_until = payment_deadline.unwrap_or_else(Utc::now) + chrono::Duration::minutes(35);
     // Staff can inspect evidence but cannot consent to sharing on an owner's
     // behalf. Retention must cover the entire bounded review, including waiting.
-    let owner: Option<Uuid> = sqlx::query_scalar("SELECT requester_id FROM site_checks WHERE id = $1 AND state = 'collected' AND snapshot IS NOT NULL AND evidence_expires_at > now() + interval '35 minutes'")
-        .bind(site_id).fetch_optional(&mut *tx).await?;
+    let owner: Option<Uuid> = sqlx::query_scalar("SELECT requester_id FROM site_checks WHERE id = $1 AND state = 'collected' AND snapshot IS NOT NULL AND evidence_expires_at > $2")
+        .bind(site_id).bind(retained_until).fetch_optional(&mut *tx).await?;
     if owner != Some(caller.id) {
         return Err(ApiError::missing());
     }
-    let snapshot = owned_snapshot(&mut tx, &caller, site_id).await?;
+    let snapshot = owned_snapshot(&mut tx, caller, site_id).await?;
     if snapshot_hash(&snapshot)? != input.snapshot_sha256 {
         return Err(ApiError::conflict("snapshot_changed"));
     }
@@ -123,7 +150,7 @@ pub(crate) async fn create(
         .map(|id| eligible.iter().find(|r| r.device_id == *id).cloned())
         .collect();
     let reviewers = reviewers.ok_or_else(|| ApiError::conflict("selected_device_unavailable"))?;
-    let (total, own): (i64, i64) = sqlx::query_as("SELECT count(*), count(*) FILTER (WHERE requester_id = $1) FROM reviews WHERE state IN ('queued','running')")
+    let (total, own): (i64, i64) = sqlx::query_as("SELECT count(*), count(*) FILTER (WHERE requester_id = $1) FROM reviews WHERE state IN ('awaiting_payment','queued','running')")
         .bind(caller.id).fetch_one(&mut *tx).await?;
     if total >= 30 || own >= 3 {
         return Err(ApiError::new(
@@ -137,8 +164,12 @@ pub(crate) async fn create(
         snapshot_sha256: input.snapshot_sha256,
         reviewers,
     };
-    sqlx::query("INSERT INTO reviews (id, requester_id, request_id, scenario, mode, deadline_at, site_check_id, website_context, consent_at) VALUES ($1,$2,$3,'website_snapshot_v1','website_agent',now() + interval '35 minutes',$4,$5,now())")
-        .bind(id).bind(caller.id).bind(input.request_id).bind(site_id).bind(DbJson(&context)).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO reviews (id, requester_id, request_id, scenario, mode, deadline_at, site_check_id, website_context, consent_at, state, payment_terms, payment_expires_at) VALUES ($1,$2,$3,'website_snapshot_v1','website_agent',COALESCE($6::timestamptz,now() + interval '35 minutes'),$4,$5,now(),$7,$8,$9)")
+        .bind(id).bind(caller.id).bind(input.request_id).bind(site_id).bind(DbJson(&context))
+        .bind(payment_deadline)
+        .bind(if payment.is_some() { "awaiting_payment" } else { "queued" })
+        .bind(payment.as_ref().map(|(price, _)| DbJson(price)))
+        .bind(payment_deadline).execute(&mut *tx).await?;
     for (position, (role, device_id)) in [
         ReviewRole::Investigator,
         ReviewRole::Reproducer,
@@ -152,7 +183,7 @@ pub(crate) async fn create(
             .bind(Uuid::new_v4()).bind(id).bind(role.as_str()).bind(position as i16).bind(device_id).execute(&mut *tx).await?;
     }
     tx.commit().await?;
-    Ok(Json(view(&state.pool, &caller, id).await?))
+    view(&state.pool, caller, id).await
 }
 
 pub(super) async fn snapshot(tx: &mut Tx<'_>, review: Uuid) -> Result<WebsiteSnapshot, ApiError> {

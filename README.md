@@ -5,7 +5,7 @@ The private Rust service that pairs devices, controls admission and assigns Patc
 
 > **DON'T TRUST! VERIFY!** Audit the implementation and test its permission boundaries. Use authorized penetration tests against your own deployment. Private source, signed results and model confidence do not establish security.
 
-**Working today:** persistent onboarding, owned example checks, approved website snapshots and explicitly shared offline agent reviews. Reports separate tool observations from model claims. Active target testing and paid admission are not enabled.
+**Working today:** persistent onboarding, owned example checks, approved website snapshots and explicitly shared offline agent reviews. Internal admission can hold an agreed review until core confirms payment. Reports separate tool observations from model claims. Active target testing and browser checkout are not enabled.
 
 ## Run locally
 
@@ -55,7 +55,7 @@ The current scenario, `access_control_v1`, is an owned access-control bug and su
 
 | Bound | Fixture check | Agent check |
 | --- | --- | --- |
-| Active reviews, both modes combined | 3 per account, 30 overall | Same |
+| Active reviews, including payment reservations | 3 per account, 30 overall | Same |
 | Concurrent assignments | 1 per device and operator's declared compute group | Same |
 | Assignment lease | 60 seconds, fixed | 60 seconds, renewable up to a fixed 10-minute deadline |
 | Attempts | Up to 3 per role | Same |
@@ -77,12 +77,21 @@ All three checks must report the expected results to complete. Agent prose alone
 | `POST /internal/pairings/claim` | Authenticated core account |
 | `GET /internal/devices`; `POST /internal/devices/:id/decision` | Account/admin through core |
 | `GET, POST /internal/reviews`; `GET /internal/reviews/:id`; `POST /internal/reviews/:id/cancel` | Requester/admin through core |
+| `POST /internal/site-checks/:id/admit-review`; `POST /internal/reviews/:id/fund` | Core, acting as the paying requester |
 | `GET, POST /internal/site-checks`; `GET /internal/site-checks/:id`; `POST /:id/cancel`; `GET /:id/evidence` | Requester/admin through core |
 | `POST /internal/site-checks/:id/decision` | Admin through core |
 | `GET /internal/site-checks/:id/compare/:baseline_id` | Requester/admin; both captures must be retained and share a requester and exact scope |
 | `GET /internal/site-checks/:id/review-plan`; `POST /:id/review` | Plan: requester/admin; sharing consent: requester only |
 
 Creating a fixture review takes `{"request_id":"<uuid>","scenario":"access_control_v1"}`; add `"mode":"owned_agent"` for the agent path. Account/request ID deduplicates the request; changing its mode is rejected. Cancellation takes `{}`. Renewal takes `{"lease_id":"<uuid>","sequence":1}`. Existing fixture requests, assignments and saved results remain compatible. Exact completion retries are accepted once; changed replays are rejected. See [shared types](../patchriot-core/crates/protocol/src/lib.rs) and [review handling](src/reviews.rs).
+
+### Reserve work before payment
+
+Core can call `admit-review` with the requester's `consent`, a server-selected `price` (`asset` and smallest-unit `amount` as strings), and `payment_expires_at` (UTC seconds, at most one hour ahead). The saved review binds that price to the exact snapshot and three selected devices. It occupies a queue slot in **awaiting_payment**; no agent receives the work or its evidence.
+
+After recording a matching settlement, core calls `fund` with `request_id`, `invoice_id` and the saved `price`. The dispatcher rechecks the agents, consent and retained snapshot, then starts the 35-minute review deadline. Repeated delivery acknowledges the same activation; one invoice cannot fund two reviews. Cancellation, expiry or removed approval prevents activation. Core retains responsibility for customer balances and refunds when work cannot start.
+
+These routes require the internal service credential and paying account. They do not accept a browser's payment claim or verify a blockchain transaction themselves. The browser's free pilot remains available; core must restrict that path when enabling paid checkout. Quote creation, funding-event delivery and refunds are separate core integration steps.
 
 ## Boundaries that matter
 
@@ -114,7 +123,7 @@ The relay reviews saved text without network access. Completion checks the snaps
 
 ### Access and execution
 
-- **Core owns accounts and money.** Dispatcher cannot create credit or choose rewards. Paid admission must use saved terms and consume funding events once; that integration follows.
+- **Core owns accounts and money.** Dispatcher cannot create credit or choose rewards. Paid admission uses saved terms and accepts each invoice once; only core can confirm settlement.
 - **Private access is checked on every read.** Assigned operators, service staff and approved providers can see assigned plaintext. No automatic publication of customer findings.
 - **Scope is enforced in code.** Website admission must verify authority before collection. An agent or webpage cannot expand approved hosts, actions, rates or time.
 - **Tools need a sandbox.** Source, hooks, installers and agent instructions are untrusted. Jev screening can flag problems; it cannot authorize access, remove isolation or move funds.

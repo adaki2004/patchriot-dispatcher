@@ -12,6 +12,7 @@ use patchriot_protocol::*;
 use sqlx::{FromRow, PgPool, Postgres, Transaction, types::Json as DbJson};
 use uuid::Uuid;
 
+pub(crate) mod funding;
 pub(crate) mod websites;
 
 type Tx<'a> = Transaction<'a, Postgres>;
@@ -26,13 +27,13 @@ async fn scheduler(tx: &mut Tx<'_>) -> Result<(), ApiError> {
 }
 
 async fn sweep(tx: &mut Tx<'_>) -> Result<(), ApiError> {
-    sqlx::query("UPDATE reviews r SET state = 'failed' WHERE r.mode = 'website_agent' AND r.state IN ('queued','running') AND (EXISTS (SELECT 1 FROM review_steps s JOIN devices d ON d.id = s.assigned_device_id WHERE s.review_id = r.id AND (d.approval <> 'approved' OR NOT d.private_work_approved)) OR NOT EXISTS (SELECT 1 FROM site_checks w WHERE w.id = r.site_check_id AND w.snapshot IS NOT NULL AND w.evidence_expires_at > now()))")
+    sqlx::query("UPDATE reviews r SET state = 'failed' WHERE r.mode = 'website_agent' AND r.state IN ('awaiting_payment','queued','running') AND (EXISTS (SELECT 1 FROM review_steps s JOIN devices d ON d.id = s.assigned_device_id WHERE s.review_id = r.id AND (d.approval <> 'approved' OR NOT d.private_work_approved)) OR NOT EXISTS (SELECT 1 FROM site_checks w WHERE w.id = r.site_check_id AND w.snapshot IS NOT NULL AND w.evidence_expires_at > now()))")
         .execute(&mut **tx).await?;
     sqlx::query("UPDATE work_leases l SET state = 'expired' FROM review_steps s, reviews r, devices d WHERE l.state = 'active' AND s.id = l.step_id AND r.id = s.review_id AND d.id = l.device_id AND (l.expires_at <= now() OR l.deadline_at <= now() OR r.deadline_at <= now() OR d.approval <> 'approved')")
         .execute(&mut **tx).await?;
     sqlx::query("UPDATE review_steps s SET state = CASE WHEN attempts < 3 THEN 'queued' ELSE 'failed' END FROM work_leases l WHERE s.current_lease_id = l.id AND s.state = 'leased' AND l.state = 'expired'")
         .execute(&mut **tx).await?;
-    sqlx::query("UPDATE reviews r SET state = 'failed' WHERE r.state IN ('queued','running') AND (r.deadline_at <= now() OR EXISTS (SELECT 1 FROM review_steps s WHERE s.review_id = r.id AND s.state = 'failed'))")
+    sqlx::query("UPDATE reviews r SET state = 'failed' WHERE r.state IN ('awaiting_payment','queued','running') AND (r.deadline_at <= now() OR EXISTS (SELECT 1 FROM review_steps s WHERE s.review_id = r.id AND s.state = 'failed'))")
         .execute(&mut **tx).await?;
     sqlx::query("UPDATE work_leases l SET state = 'cancelled' FROM review_steps s, reviews r WHERE s.id = l.step_id AND r.id = s.review_id AND r.state IN ('failed','cancelled') AND l.state = 'active'")
         .execute(&mut **tx).await?;
@@ -57,6 +58,10 @@ struct ReviewRow {
     mode: String,
     scenario: String,
     website_context: Option<DbJson<patchriot_protocol::website_reviews::WebsiteReviewContext>>,
+    payment_terms: Option<DbJson<patchriot_protocol::website_reviews::ReviewPrice>>,
+    payment_expires_at: Option<DateTime<Utc>>,
+    funded_invoice_id: Option<Uuid>,
+    funded_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     deadline_at: DateTime<Utc>,
 }
@@ -86,7 +91,7 @@ async fn views(
     caller: &Actor,
     id: Option<Uuid>,
 ) -> Result<Vec<ReviewView>, ApiError> {
-    let reviews = sqlx::query_as::<_, ReviewRow>("SELECT id, request_id, state, mode, scenario, website_context, created_at, deadline_at FROM reviews WHERE (requester_id = $1 OR $2) AND ($3::uuid IS NULL OR id = $3) ORDER BY created_at DESC LIMIT 50")
+    let reviews = sqlx::query_as::<_, ReviewRow>("SELECT id, request_id, state, mode, scenario, website_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at FROM reviews WHERE (requester_id = $1 OR $2) AND ($3::uuid IS NULL OR id = $3) ORDER BY created_at DESC LIMIT 50")
         .bind(caller.id).bind(caller.admin).bind(id).fetch_all(pool).await?;
     let ids: Vec<_> = reviews.iter().map(|r| r.id).collect();
     let steps = sqlx::query_as::<_, StepRow>("SELECT s.review_id, s.role, s.state, s.attempts, l.device_id, l.operator_id, l.compute_group, CASE WHEN $2 THEN s.result ELSE NULL END AS result, s.fixture_matches, s.evidence_complete FROM review_steps s LEFT JOIN work_leases l ON l.id = s.current_lease_id WHERE s.review_id = ANY($1) ORDER BY s.position")
@@ -124,6 +129,17 @@ async fn views(
             deadline_at: review.deadline_at.timestamp(),
             steps: parts,
             website: review.website_context.map(|context| context.0),
+            payment: review
+                .payment_terms
+                .zip(review.payment_expires_at)
+                .map(
+                    |(price, expires)| patchriot_protocol::website_reviews::ReviewPayment {
+                        price: price.0,
+                        expires_at: expires.timestamp(),
+                        invoice_id: review.funded_invoice_id,
+                        funded_at: review.funded_at.map(|time| time.timestamp()),
+                    },
+                ),
         });
     }
     Ok(result)
@@ -162,7 +178,7 @@ pub async fn create(
         tx.commit().await?;
         return Ok(Json(view(&state.pool, &caller, id).await?));
     }
-    let (total, own): (i64, i64) = sqlx::query_as("SELECT count(*), count(*) FILTER (WHERE requester_id = $1) FROM reviews WHERE state IN ('queued','running')")
+    let (total, own): (i64, i64) = sqlx::query_as("SELECT count(*), count(*) FILTER (WHERE requester_id = $1) FROM reviews WHERE state IN ('awaiting_payment','queued','running')")
         .bind(caller.id).fetch_one(&mut *tx).await?;
     if total >= 30 || own >= 3 {
         return Err(ApiError::new(
@@ -239,7 +255,7 @@ pub async fn cancel(
     .fetch_optional(&mut *tx)
     .await?;
     let status = status.ok_or_else(ApiError::missing)?;
-    if !["queued", "running", "cancelled"].contains(&status.as_str()) {
+    if !["awaiting_payment", "queued", "running", "cancelled"].contains(&status.as_str()) {
         return Err(ApiError::conflict("review_already_finished"));
     }
     sqlx::query("UPDATE reviews SET state = 'cancelled' WHERE id = $1")

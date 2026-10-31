@@ -29,6 +29,8 @@ struct DeviceRow {
     public_key: String,
     introduction: DbJson<DeviceIntroduction>,
     approval: String,
+    private_work_approved: bool,
+    website_reviews: bool,
     last_seen_at: Option<DateTime<Utc>>,
     sequence: i64,
     last_payload_hash: Option<String>,
@@ -68,6 +70,8 @@ impl DeviceRow {
             declared_model: intro.declared_model.clone(),
             compute_group: intro.compute_group.clone(),
             approval: self.approval.clone(),
+            private_work_approved: self.private_work_approved,
+            website_reviews: self.website_reviews,
             state: self.state().into(),
             last_seen_at: self.last_seen_at.map(|t| t.timestamp()),
             sequence: self.sequence as u64,
@@ -260,10 +264,11 @@ pub async fn decision(
     {
         return Err(ApiError::bad("invalid_reason"));
     }
-    if !["approve", "revoke"].contains(&input.action.as_str()) {
+    if !["approve", "revoke", "approve_private", "revoke_private"].contains(&input.action.as_str())
+    {
         return Err(ApiError::bad("invalid_action"));
     }
-    if input.action == "approve" && !caller.admin {
+    if ["approve", "approve_private"].contains(&input.action.as_str()) && !caller.admin {
         return Err(ApiError::new(StatusCode::FORBIDDEN, "admin_required"));
     }
     let mut tx = state.pool.begin().await?;
@@ -274,6 +279,51 @@ pub async fn decision(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(ApiError::missing)?;
+    if ["approve_private", "revoke_private"].contains(&input.action.as_str()) {
+        let approved = input.action == "approve_private";
+        if approved
+            && (row.approval != "approved"
+                || row.introduction.runtime != RuntimeKind::Hermes
+                || row.introduction.declared_model.is_none())
+        {
+            return Err(ApiError::conflict("approved_agent_required"));
+        }
+        if approved
+            && input
+                .reason
+                .as_deref()
+                .is_none_or(|reason| reason.trim().len() < 12)
+        {
+            return Err(ApiError::bad("private_approval_reason_required"));
+        }
+        if row.private_work_approved != approved {
+            sqlx::query(
+                "UPDATE devices SET private_work_approved = $2, updated_at = now() WHERE id = $1",
+            )
+            .bind(id)
+            .bind(approved)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "INSERT INTO device_events (device_id,actor_id,action,reason) VALUES ($1,$2,$3,$4)",
+            )
+            .bind(id)
+            .bind(caller.id)
+            .bind(if approved {
+                "private_approved"
+            } else {
+                "private_revoked"
+            })
+            .bind(input.reason)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        crate::reviews::expire(&state.pool).await?;
+        let row = sqlx::query_as::<_, DeviceRow>("SELECT d.*, o.display_name AS operator_name FROM devices d JOIN operators o ON o.id = d.operator_id WHERE d.id = $1")
+            .bind(id).fetch_one(&state.pool).await?;
+        return Ok(Json(row.view()));
+    }
     if row.approval == "revoked" && input.action == "approve" {
         return Err(ApiError::conflict("revoked_device_requires_new_key"));
     }
@@ -283,7 +333,7 @@ pub async fn decision(
         "revoked"
     };
     if row.approval != approval {
-        sqlx::query("UPDATE devices SET approval = $1, approval_reason = $2, approved_by = $3, updated_at = now() WHERE id = $4")
+        sqlx::query("UPDATE devices SET approval = $1, approval_reason = $2, approved_by = $3, private_work_approved = CASE WHEN $1 = 'revoked' THEN false ELSE private_work_approved END, updated_at = now() WHERE id = $4")
             .bind(approval).bind(&input.reason).bind(caller.id).bind(id).execute(&mut *tx).await?;
         sqlx::query(
             "INSERT INTO device_events (device_id, actor_id, action, reason) VALUES ($1,$2,$3,$4)",

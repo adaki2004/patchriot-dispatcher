@@ -95,12 +95,27 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/internal/site-checks/{id}/cancel", post(websites::cancel))
         .route(
+            "/internal/site-checks/{id}/review-plan",
+            get(reviews::websites::plan),
+        )
+        .route(
+            "/internal/site-checks/{id}/review",
+            post(reviews::websites::create),
+        )
+        .route(
             "/internal/site-checks/{id}/evidence",
             get(websites::artifact),
         )
         .route("/v1/devices/{id}/work/poll", post(reviews::poll))
         .route("/v1/devices/{id}/work/renew", post(reviews::renew))
-        .route("/v1/devices/{id}/work/complete", post(reviews::complete))
+        .route(
+            "/v1/devices/{id}/work/evidence",
+            post(reviews::websites::evidence),
+        )
+        .route(
+            "/v1/devices/{id}/work/complete",
+            post(reviews::complete).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(SetResponseHeaderLayer::overriding(
             header::CACHE_CONTROL,

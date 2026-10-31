@@ -15,6 +15,8 @@ use uuid::Uuid;
 
 #[path = "sites/mod.rs"]
 mod sites;
+#[path = "sites/reviews.rs"]
+mod website_reviews;
 
 struct TestApp {
     app: Router,
@@ -212,7 +214,10 @@ impl TestApp {
             .signed(
                 key,
                 &format!("/v1/devices/{id}/work/poll"),
-                WorkPoll { sequence },
+                WorkPoll {
+                    sequence,
+                    website_reviews: false,
+                },
             )
             .await;
         assert_eq!(response.0, StatusCode::OK, "{}", response.1);
@@ -753,7 +758,10 @@ async fn concurrent_polls_share_one_compute_slot_and_replays_do_not_extend_lease
         .signed(
             &keys[winner],
             &format!("/v1/devices/{}/work/poll", ids[winner]),
-            WorkPoll { sequence: 1 },
+            WorkPoll {
+                sequence: 1,
+                website_reviews: false,
+            },
         )
         .await;
     assert_eq!(stale.0, StatusCode::CONFLICT);
@@ -890,7 +898,10 @@ async fn queue_capacity_unsupported_targets_and_ineligible_devices_fail_before_a
         test.signed(
             &key,
             &format!("/v1/devices/{id}/work/poll"),
-            WorkPoll { sequence: 1 }
+            WorkPoll {
+                sequence: 1,
+                website_reviews: false
+            }
         )
         .await
         .0,
@@ -920,7 +931,10 @@ async fn queue_capacity_unsupported_targets_and_ineligible_devices_fail_before_a
         test.signed(
             &wrong_key,
             &format!("/v1/devices/{id}/work/poll"),
-            WorkPoll { sequence: 3 }
+            WorkPoll {
+                sequence: 3,
+                website_reviews: false
+            }
         )
         .await
         .0,

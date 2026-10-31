@@ -5,7 +5,7 @@ The private Rust service that pairs devices, controls admission and assigns Patc
 
 > **DON'T TRUST! VERIFY!** Audit the implementation and test its permission boundaries. Use authorized penetration tests against your own deployment. Private source, signed results and model confidence do not establish security.
 
-**Working today:** persistent onboarding, three sequential checks of an owned example, and manually approved website snapshots. The example can use fixtures or isolated local agents; their reports separate tool observations from model explanations. Website collection keeps private evidence for later review. Customer agent assessments and paid admission are not enabled.
+**Working today:** persistent onboarding, owned example checks, approved website snapshots and explicitly shared offline agent reviews. Reports separate tool observations from model claims. Active target testing and paid admission are not enabled.
 
 ## Run locally
 
@@ -63,12 +63,14 @@ All three checks must report the expected results to complete. Agent prose alone
 | `POST /v1/pairings/{start,status}` | Signed device |
 | `POST /v1/devices/:id/heartbeat` | Paired device |
 | `POST /v1/devices/:id/work/{poll,renew,complete}` | Approved, opted-in device |
+| `POST /v1/devices/:id/work/evidence` | Selected device with a current private-review lease |
 | `GET /v1/fleet` | Public aggregate counts |
 | `POST /internal/pairings/claim` | Authenticated core account |
 | `GET /internal/devices`; `POST /internal/devices/:id/decision` | Account/admin through core |
 | `GET, POST /internal/reviews`; `GET /internal/reviews/:id`; `POST /internal/reviews/:id/cancel` | Requester/admin through core |
 | `GET, POST /internal/site-checks`; `GET /internal/site-checks/:id`; `POST /:id/cancel`; `GET /:id/evidence` | Requester/admin through core |
 | `POST /internal/site-checks/:id/decision` | Admin through core |
+| `GET /internal/site-checks/:id/review-plan`; `POST /:id/review` | Plan: requester/admin; sharing consent: requester only |
 
 Creating a fixture review takes `{"request_id":"<uuid>","scenario":"access_control_v1"}`; add `"mode":"owned_agent"` for the agent path. Account/request ID deduplicates the request; changing its mode is rejected. Cancellation takes `{}`. Renewal takes `{"lease_id":"<uuid>","sequence":1}`. Existing fixture requests, assignments and saved results remain compatible. Exact completion retries are accepted once; changed replays are rejected. See [shared types](../patchriot-core/crates/protocol/src/lib.rs) and [review handling](src/reviews.rs).
 
@@ -84,7 +86,19 @@ This is **a limited snapshot, not a browser audit or a safety verdict**. It does
 
 Account/request IDs deduplicate submissions; changed scope is rejected. The pilot allows two pending/active requests and three submissions per day per account, ten overall per day, and one collection at a time across dispatcher instances. Approval expires after ten minutes. A 45-second lease recovers one interrupted attempt; retries never extend approval. Cancellation and expiry reject late results. During collection the worker checks its lease every second; already sent requests may finish.
 
-Raw evidence is readable for seven days, then removed by the worker's sweep. Downloads check both ownership and retention in the database. Scope, decisions, status and small summaries remain in history. This path does not spend funds, send evidence to agents or create a security verdict.
+Raw evidence is readable for seven days, then removed by the worker's sweep. Downloads check both ownership and retention in the database. Scope, decisions, status and small summaries remain in history. Collection itself does not spend funds or send evidence to agents.
+
+### Private website reviews
+
+`website_agent` runs `website_snapshot_v1` through the same bounded queue, with three extra gates:
+
+1. An admin grants **private-work approval** to a Hermes device, with a recorded reason. Existing demo approvals do not qualify.
+2. Its signed poll explicitly declares `website_reviews: true`. Older polls retain their signature format and receive only demo work.
+3. The snapshot owner consents to three exact device IDs, ordered investigator/reproducer/challenger, and the saved snapshot SHA-256. Operator, model and compute-group declarations are recorded with consent.
+
+Roles stay pinned to those devices. No fallback operator receives the data. Only a live assigned lease can download the original snapshot and preceding reports; cancellation, expiry and revocation stop downloads and renewals. Paused or stale devices cannot read evidence. Removing private approval fails active reviews involving that device. Data already received cannot be recalled.
+
+The relay reviews saved text without network access. Completion checks the snapshot binding, tool observation, bounded report and exact quotations. `evidence_complete` describes these checks; it does not certify security reasoning, exploitability or a proposed fix. Incomplete evidence stays `needs_review`. All three reports being complete is not a safety verdict or proof of independent operators. Reports can retain short quotations after raw-body retention ends.
 
 ### Access and execution
 

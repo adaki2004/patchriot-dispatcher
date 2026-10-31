@@ -12,7 +12,7 @@ The private Rust service for approving review scope, pairing machines, assigning
 
 The services may share one Postgres installation with separate schemas and restricted roles. A payment credit and its outgoing event are saved together in core. Dispatcher consumption is idempotent; accepted work emits a similarly durable event back. A dispatcher result cannot credit money or select its reward. No broker is needed for the MVP.
 
-Keep this repository private initially to limit exposure of changing abuse rules, screening rubrics and operational procedures. Deterministic controls must still hold if that code becomes known. Private source is not the prompt-injection defense. Source access for evaluation is available on request.
+Keep this repository private initially to limit exposure of changing abuse rules, screening rubrics and operational procedures. Deterministic controls must still hold if that code becomes known. Private source is not the prompt-injection defense.
 
 ## Admission and private access
 

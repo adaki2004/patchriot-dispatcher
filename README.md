@@ -46,6 +46,8 @@ A hosting provider's IP range, an invoice or a claimed identity check does not e
 
 Persist declared model/runtime, capability evidence, privacy eligibility, heartbeat and local capacity. Busy nodes contribute no free slot. Use expiring leases with attempt IDs and fencing tokens: a superseded result cannot replace the active attempt. Retry capacity failures with bounded backoff; an unanswered offer releases its own slot without cancelling healthy reviews. Deduplicate completion and accepted-work events transactionally.
 
+The CPU pilot aims for three approved contributors; no stake or on-chain identity is required. Keep operator, device, agent session, model and shared-compute identity separate. One GPU serving three roles sequentially provides one compute slot, not three. The initial shared-host limit is one active inference assignment across those sessions. Independent accounts on shared infrastructure do not remove that common failure point. Contributor collateral is deferred; any later design needs explicit custody, withdrawal and dispute rules and cannot replace approval or evidence checks.
+
 ## Findings and review
 
 ```text
@@ -66,6 +68,16 @@ Store finding ID/schema, target commit, location, preconditions, severity ration
 
 Deduplicate related claims and bound findings, retries, runtime and reviewer spending per job. Reserve validation capacity so discovery cannot starve it. Admin settings cover concurrency, per-operator limits, review profile, queue age, source/artifact size, deadlines and retry budget; pin material settings in the quote instead of altering a paid job's terms.
 
+## Recurring website checks — planned
+
+Build this after an owned one-off website review works. A schedule binds the requester, verified scope, permitted probes, time zone, frequency, approved baseline and saved price/spending limits. Each occurrence becomes a normal bounded review job and uses core's prepaid balance; the scheduler cannot create financial credit or bypass admission. Recheck authorization and available funds before every occurrence. Pause revoked or unfunded schedules and show the reason.
+
+Use a unique `(schedule_id, scheduled_at)` occurrence with transactional creation and core funding reservations so concurrent scheduler ticks, restarts and retries cannot queue or charge the same run twice. Do not overlap runs for one schedule. If downtime misses several checks, mark them missed and queue at most one current check; avoid a catch-up burst. A daily noon schedule follows its saved IANA time zone. Define daylight-saving handling when configurable local times are added, and show the next run before enabling it. Price increases or broader scope require renewed agreement.
+
+Compare bounded browser/network evidence with an explicitly approved baseline. A content hash changing is an observation, not a maliciousness verdict. Keep `no_material_change`, `changed`, `needs_review`, `confirmed_finding`, `failed` and `skipped` separate, with evidence and last-success timestamps. Failed checks must never produce a green safety status. Suspect content cannot approve itself as a new baseline.
+
+Send private, deduplicated alerts to the account's verified notification destination. Include the finding summary and an authenticated report link, not source code or credentials. A webpage or agent output cannot choose the alert recipient, modify the schedule or authorize a production fix. Start with the dashboard and one verified notification channel; broader integrations can follow.
+
 ## Data and operations
 
 Source bundles, logs and reports remain in private storage, accessed through authenticated routes or short-lived job-scoped links. Node operators and permitted model providers see their assigned plaintext and may retain it; deletion cannot prove otherwise. Publish retention terms before beta. TEE attestation is a V2 investigation, not an existing confidentiality claim.
@@ -74,6 +86,6 @@ Core serves the public incident feed from separately approved drafts. Never use 
 
 Required checks: cross-account reads; revoked devices; replayed and stale results; hostile repository hooks/archives; network escape attempts; cancelled child processes; missing or colluding reviewers; fabricated evidence; patch regressions; duplicate payment/work events; bounded queues; safe report rendering. Use owned fixtures and local infrastructure first.
 
-Core contains payment/reconciliation implementation and tests. This service consumes only authenticated funding state and emits accepted-work records; financial amounts and withdrawals remain core's responsibility. Deployment requires valid configuration and separate authorization; lack of keys must never enable permissive production behavior.
+Core owns the planned payment/reconciliation implementation and tests. This service will consume only authenticated funding state and emit accepted-work records; financial amounts and withdrawals remain core's responsibility. Deployment requires valid configuration and separate authorization; lack of keys must never enable permissive production behavior.
 
 See [LICENSE](LICENSE) for the private source policy and [NOTICE](NOTICE) for attribution.

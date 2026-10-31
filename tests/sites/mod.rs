@@ -274,6 +274,124 @@ async fn private_evidence_is_never_in_lists_and_expires_on_reads() {
 }
 
 #[tokio::test]
+async fn comparisons_require_two_retained_snapshots_with_the_same_owner_and_scope() {
+    let app = TestApp::new().await;
+    let mut ids = Vec::new();
+    for start in [10, 20] {
+        let created = create(&app, request()).await;
+        let id: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+        let snapshot = json!({"schema_version":1,"scope":created["scope"],"homepage":{"kind":"homepage","url":"https://example.com/","sha256":"1".repeat(64),"bytes":8,"content_type":"text/html","headers":{"x-frame-options": if start == 10 { "DENY" } else { "SAMEORIGIN" }},"text":"private!","collected_at":start,"connected_ip":null},"resources":[],"scripts":[],"script_limit_reached":false,"requests_made":1,"captured_response_bytes":8,"started_at":start,"finished_at":start+1});
+        sqlx::query("UPDATE site_checks SET state='collected', snapshot=$2, evidence_expires_at=now()+interval '7 days' WHERE id=$1")
+            .bind(id).bind(sqlx::types::Json(snapshot)).execute(&app.pool).await.unwrap();
+        ids.push(id);
+    }
+    let (earlier, later) = (ids[0], ids[1]);
+    let path = format!("/internal/site-checks/{later}/compare/{earlier}");
+    assert_eq!(
+        app.request("GET", &path, json!({}), None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        app.request("GET", &path, json!({}), Some((Uuid::new_v4(), false)))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let (status, comparison) = app
+        .request("GET", &path, json!({}), Some((app.owner, false)))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{comparison}");
+    assert_eq!(comparison["baseline_id"], earlier.to_string());
+    assert_eq!(comparison["current_id"], later.to_string());
+    assert_eq!(comparison["resources"][0]["change"], "changed");
+    assert_eq!(
+        comparison["resources"][0]["before"]["headers"]["x-frame-options"],
+        "DENY"
+    );
+    assert_eq!(
+        comparison["resources"][0]["after"]["headers"]["x-frame-options"],
+        "SAMEORIGIN"
+    );
+    assert!(!comparison.to_string().contains("private!"));
+    assert_eq!(
+        app.request("GET", &path, json!({}), Some((app.admin, true)))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.request(
+            "GET",
+            &format!("/internal/site-checks/{earlier}/compare/{later}"),
+            json!({}),
+            Some((app.owner, false))
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        app.request(
+            "GET",
+            &format!("/internal/site-checks/{later}/compare/{later}"),
+            json!({}),
+            Some((app.owner, false))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    sqlx::query("UPDATE site_checks SET requester_id=$2 WHERE id=$1")
+        .bind(earlier)
+        .bind(Uuid::new_v4())
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.request("GET", &path, json!({}), Some((app.owner, false)))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        app.request("GET", &path, json!({}), Some((app.admin, true)))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    sqlx::query("UPDATE site_checks SET requester_id=$2, scope_sha256=repeat('f',64) WHERE id=$1")
+        .bind(earlier)
+        .bind(app.owner)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.request("GET", &path, json!({}), Some((app.owner, false)))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    sqlx::query("UPDATE site_checks SET evidence_expires_at=now()-interval '1 second' WHERE id=$1")
+        .bind(earlier)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.request("GET", &path, json!({}), Some((app.admin, true)))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let counts: (i64, i64) =
+        sqlx::query_as("SELECT count(*),sum(attempts)::bigint FROM site_checks")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(counts, (2, 0), "comparison did not start collection");
+    app.finish().await;
+}
+
+#[tokio::test]
 async fn expired_or_rejected_scope_cannot_be_reopened_by_repeated_approval() {
     let app = TestApp::new().await;
     let created = create(&app, request()).await;

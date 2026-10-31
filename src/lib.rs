@@ -90,6 +90,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/internal/site-checks/{id}", get(websites::detail))
         .route(
+            "/internal/site-checks/{id}/compare/{baseline_id}",
+            get(websites::compare),
+        )
+        .route(
             "/internal/site-checks/{id}/decision",
             post(websites::decide),
         )

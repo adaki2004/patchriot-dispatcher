@@ -245,3 +245,32 @@ pub(crate) async fn artifact(
         .bind(id).bind(caller.id).bind(caller.admin).fetch_optional(&state.pool).await?.ok_or_else(ApiError::missing)?;
     Ok(Json(blob.0))
 }
+
+pub(crate) async fn compare(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, baseline_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<WebsiteComparison>, ApiError> {
+    let caller = actor(&headers, &state)?;
+    if id == baseline_id {
+        return Err(ApiError::bad("choose_two_snapshots"));
+    }
+    // One statement applies ownership and retention to both bodies before they
+    // leave the database. Comparison performs no target requests or agent work.
+    let rows: Vec<(Uuid, Uuid, String, DbJson<WebsiteSnapshot>)> = sqlx::query_as("SELECT id, requester_id, scope_sha256, snapshot FROM site_checks WHERE id IN ($1, $2) AND (requester_id = $3 OR $4) AND state = 'collected' AND snapshot IS NOT NULL AND evidence_expires_at > now()")
+        .bind(id).bind(baseline_id).bind(caller.id).bind(caller.admin).fetch_all(&state.pool).await?;
+    let current = rows
+        .iter()
+        .find(|r| r.0 == id)
+        .ok_or_else(ApiError::missing)?;
+    let baseline = rows
+        .iter()
+        .find(|r| r.0 == baseline_id)
+        .ok_or_else(ApiError::missing)?;
+    if current.1 != baseline.1 || current.2 != baseline.2 {
+        return Err(ApiError::conflict("comparison_scope_mismatch"));
+    }
+    let result = super::comparison::compare(baseline_id, id, &baseline.3.0, &current.3.0)
+        .map_err(ApiError::conflict)?;
+    Ok(Json(result))
+}

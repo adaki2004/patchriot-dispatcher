@@ -350,7 +350,7 @@ pub async fn heartbeat(
 }
 
 pub async fn fleet(State(state): State<AppState>) -> Result<Json<FleetSummary>, ApiError> {
-    let (devices, operators, groups): (i64, i64, i64) = sqlx::query_as("SELECT count(*), count(DISTINCT operator_id), count(DISTINCT introduction->>'compute_group') FROM devices WHERE approval = 'approved' AND NOT paused AND last_seen_at > now() - interval '30 seconds'")
+    let (devices, operators, groups): (i64, i64, i64) = sqlx::query_as("SELECT count(*), count(DISTINCT operator_id), count(DISTINCT (operator_id, introduction->>'compute_group')) FROM devices WHERE approval = 'approved' AND NOT paused AND last_seen_at > now() - interval '30 seconds'")
         .fetch_one(&state.pool).await?;
     Ok(Json(FleetSummary {
         online_devices: devices,

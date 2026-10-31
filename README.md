@@ -5,7 +5,7 @@ The private Rust service that pairs devices, controls admission and assigns Patc
 
 > **DON'T TRUST! VERIFY!** Audit the implementation and test its permission boundaries. Use authorized penetration tests against your own deployment. Private source, signed results and model confidence do not establish security.
 
-**Working today:** persistent onboarding and a bounded, three-role owned-fixture queue. Customer targets, model execution and paid admission are not enabled.
+**Working today:** persistent onboarding and a bounded queue for three sequential checks of an owned example. Fixture and agent evidence use separate formats. The server supports renewable agent assignments; relay and website integration follow. Customer targets and paid admission are not enabled.
 
 ## Run locally
 
@@ -42,17 +42,19 @@ flowchart LR
   C --> E[Private evidence]
 ```
 
-The current scenario, `access_control_v1`, is a compiled-in original/patch/clean-control example. Three distinct approved devices run the roles sequentially. Evidence is **device-reported**, not independently re-executed or a customer audit.
+The current scenario, `access_control_v1`, is an owned access-control bug and supplied fix. `owned_fixture` uses compiled original/patch/clean-control checks; `owned_agent` asks a declared agent runtime to inspect and test the example. Each mode goes only to its matching runtime. Three distinct approved devices run sequentially. Evidence is **operator-reported**, not independently re-executed or a customer audit.
 
-| Bound | Fixture pilot |
-| --- | --- |
-| Active reviews | 3 per account, 30 overall |
-| Concurrent assignments | 1 per device and declared compute group |
-| Assignment lease | 60 seconds; retries do not extend it |
-| Attempts | Up to 3 per role |
-| Review lifetime | 15 minutes |
+| Bound | Fixture check | Agent check |
+| --- | --- | --- |
+| Active reviews, both modes combined | 3 per account, 30 overall | Same |
+| Concurrent assignments | 1 per device and operator's declared compute group | Same |
+| Assignment lease | 60 seconds, fixed | 60 seconds, renewable up to a fixed 10-minute deadline |
+| Attempts | Up to 3 per role | Same |
+| Review lifetime, including waiting/retries | 15 minutes | 35 minutes |
 
-All roles must report the expected results to complete. Contradictions produce **needs_review**. Cancellation and revocation reject late results; superseded attempts cannot complete replacements. Expiry is processed during polling and authorized queue reads. Shared-host/operator identities remain visible.
+Renewal requires a signed, increasing sequence, a current assignment and fresh, unpaused presence. Duplicate renewals return the existing expiry and remaining time; they do not add time. Cancellation, expiry and revocation stop renewal. Clients must use a monotonic deadline and stop before losing the lease, including during a network outage.
+
+All three checks must report the expected results to complete. Agent prose alone cannot pass: the result needs the original/fixed terminal observations, model-call count and confirmed cleanup. Missing or contradictory evidence produces **needs_review**. Cancellation and revocation reject late results; superseded attempts cannot complete replacements. Expiry is processed during polling and authorized queue reads. Shared-host/operator identities remain visible; model names and digests are declarations, not attestations.
 
 ## API map
 
@@ -60,13 +62,13 @@ All roles must report the expected results to complete. Contradictions produce *
 | --- | --- |
 | `POST /v1/pairings/{start,status}` | Signed device |
 | `POST /v1/devices/:id/heartbeat` | Paired device |
-| `POST /v1/devices/:id/work/{poll,complete}` | Approved, opted-in device |
+| `POST /v1/devices/:id/work/{poll,renew,complete}` | Approved, opted-in device |
 | `GET /v1/fleet` | Public aggregate counts |
 | `POST /internal/pairings/claim` | Authenticated core account |
 | `GET /internal/devices`; `POST /internal/devices/:id/decision` | Account/admin through core |
 | `GET, POST /internal/reviews`; `GET /internal/reviews/:id`; `POST /internal/reviews/:id/cancel` | Requester/admin through core |
 
-Creating a fixture review takes `{"request_id":"<uuid>","scenario":"access_control_v1"}`; account/request ID deduplicates it. Cancellation takes `{}`. Exact completion retries are accepted once; changed replays are rejected. See [device handling](src/devices.rs) and [review handling](src/reviews.rs) for the authoritative behavior.
+Creating a fixture review takes `{"request_id":"<uuid>","scenario":"access_control_v1"}`; add `"mode":"owned_agent"` for the agent path. Account/request ID deduplicates the request; changing its mode is rejected. Cancellation takes `{}`. Renewal takes `{"lease_id":"<uuid>","sequence":1}`. Existing fixture requests, assignments and saved results remain compatible. Exact completion retries are accepted once; changed replays are rejected. See [shared types](../patchriot-core/crates/protocol/src/lib.rs) and [review handling](src/reviews.rs).
 
 ## Boundaries that matter
 
@@ -76,7 +78,7 @@ Creating a fixture review takes `{"request_id":"<uuid>","scenario":"access_contr
 - **Tools need a sandbox.** Source, hooks, installers and agent instructions are untrusted. Jev screening can flag problems; it cannot authorize access, remove isolation or move funds.
 - **Evidence beats votes.** Future customer findings need independent reproduction and meaningful before/after patch tests. Missing evidence stays unresolved.
 
-Google login and stronger patcher/admin authentication belong in core. Real agent execution, owned-site checks, private artifacts and recurring checks follow the fixture pilot. Recurring jobs must recheck scope, funds and capacity on every occurrence; missed runs must not create a burst.
+Google login and stronger patcher/admin authentication belong in core. Owned-site checks, customer artifacts and recurring checks follow the pilot. Recurring jobs must recheck scope, funds and capacity on every occurrence; missed runs must not create a burst.
 
 ## Verify it
 

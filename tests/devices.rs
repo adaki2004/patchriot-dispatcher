@@ -230,8 +230,63 @@ impl TestApp {
             &format!("/v1/devices/{id}/work/complete"),
             CompleteWork {
                 lease_id: lease,
-                result,
+                result: WorkResult::Fixture(result),
             },
+        )
+        .await
+    }
+
+    async fn agent(&self, key: &DeviceKey, owner: Uuid) -> Uuid {
+        let introduction = DeviceIntroduction {
+            runtime: RuntimeKind::Hermes,
+            runtime_version: "test-runtime".into(),
+            declared_model: Some("test-local-model".into()),
+            ..Self::introduction()
+        };
+        let response = self.signed(key, PAIRING_START_PATH, introduction).await;
+        assert_eq!(response.0, StatusCode::OK, "{}", response.1);
+        let pair: PairingStarted = serde_json::from_value(response.1).unwrap();
+        let response = self.claim(&pair.user_code, owner).await;
+        assert_eq!(response.0, StatusCode::OK, "{}", response.1);
+        let id = serde_json::from_value::<PairingStatus>(response.1)
+            .unwrap()
+            .device_id
+            .unwrap();
+        self.approve(id).await;
+        assert_eq!(
+            self.signed(
+                key,
+                &format!("/v1/devices/{id}/heartbeat"),
+                Heartbeat {
+                    sequence: 1,
+                    paused: false,
+                    running: 0
+                }
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        id
+    }
+
+    async fn agent_review(&self) -> ReviewView {
+        let response = self.request("POST", "/internal/reviews", json!({"request_id":Uuid::new_v4(), "scenario":"access_control_v1", "mode":"owned_agent"}), Some((self.owner, false))).await;
+        assert_eq!(response.0, StatusCode::OK, "{}", response.1);
+        serde_json::from_value(response.1).unwrap()
+    }
+
+    async fn renew(
+        &self,
+        key: &DeviceKey,
+        id: Uuid,
+        lease_id: Uuid,
+        sequence: u64,
+    ) -> (StatusCode, Value) {
+        self.signed(
+            key,
+            &format!("/v1/devices/{id}/work/renew"),
+            RenewWork { lease_id, sequence },
         )
         .await
     }
@@ -939,5 +994,422 @@ async fn conflicting_fixture_evidence_stays_needs_review_after_all_roles_report(
             .iter()
             .all(|s| s["state"] == "completed")
     );
+    test.finish().await;
+}
+
+fn agent_result() -> AgentResult {
+    AgentResult {
+        kind: AgentResultKind::OwnedAgentV1,
+        outcome: AgentOutcome::Passed,
+        declared_model: "test-local-model".into(),
+        model: "test-serving-profile".into(),
+        model_digest: "a".repeat(64),
+        image_digest: format!("sha256:{}", "b".repeat(64)),
+        duration_ms: 500_000,
+        inference_calls: 2,
+        terminal_calls: 1,
+        cleanup_confirmed: true,
+        observation: Some(AgentFixtureObservation {
+            original: AgentFixtureCheck {
+                owner_reads: true,
+                blocks_other_user: false,
+            },
+            patched: AgentFixtureCheck {
+                owner_reads: true,
+                blocks_other_user: true,
+            },
+        }),
+        summary: "Observed the original failure and the supplied patch passing.".into(),
+    }
+}
+
+#[tokio::test]
+async fn agent_reviews_bind_runtime_result_kind_and_declared_model() {
+    let test = TestApp::new().await;
+    let review = test.agent_review().await;
+    assert_eq!(review.mode, "owned_agent");
+    assert_eq!(review.deadline_at - review.created_at, 35 * 60);
+    let conflict = test
+        .request(
+            "POST",
+            "/internal/reviews",
+            json!({"request_id":review.request_id, "scenario":"access_control_v1"}),
+            Some((test.owner, false)),
+        )
+        .await;
+    assert_eq!(conflict.0, StatusCode::CONFLICT);
+    let fixture_key = DeviceKey::from_bytes(&[70; 32]);
+    let fixture_device = test.online(&fixture_key).await;
+    assert!(test.work(&fixture_key, fixture_device, 1).await.is_none());
+
+    for seed in 71..74 {
+        let key = DeviceKey::from_bytes(&[seed; 32]);
+        let id = test.agent(&key, test.owner).await;
+        let assignment = test.work(&key, id, 1).await.unwrap();
+        assert_eq!(assignment.mode, ReviewMode::OwnedAgent);
+        assert_eq!(assignment.review_id, review.id);
+        assert_eq!(
+            test.complete_work(&key, id, assignment.lease_id, fixture_result())
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        let path = format!("/v1/devices/{id}/work/complete");
+        let mut result = agent_result();
+        result.declared_model = "unpaired-model".into();
+        assert_eq!(
+            test.signed(
+                &key,
+                &path,
+                CompleteWork {
+                    lease_id: assignment.lease_id,
+                    result: WorkResult::Agent(result)
+                }
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        let body = CompleteWork {
+            lease_id: assignment.lease_id,
+            result: WorkResult::Agent(agent_result()),
+        };
+        let response = test.signed(&key, &path, &body).await;
+        assert_eq!(response.0, StatusCode::OK, "{}", response.1);
+        assert_eq!(response.1["fixture_matches"], true);
+        let replay = test.signed(&key, &path, &body).await;
+        assert_eq!(replay.0, StatusCode::OK);
+        assert_eq!(replay.1["replayed"], true);
+        assert_eq!(
+            test.renew(&key, id, assignment.lease_id, 1).await.0,
+            StatusCode::CONFLICT
+        );
+        assert!(test.work(&key, id, 2).await.is_none());
+    }
+    let path = format!("/internal/reviews/{}", review.id);
+    let response = test
+        .request("GET", &path, Value::Null, Some((test.owner, false)))
+        .await;
+    assert_eq!(response.1["state"], "completed");
+    assert_eq!(
+        response.1["evidence_source"],
+        "agent_reported_owned_example_not_independently_verified"
+    );
+    assert_eq!(response.1["steps"][0]["result"]["kind"], "owned_agent_v1");
+    assert_eq!(
+        test.request("GET", &path, Value::Null, Some((Uuid::new_v4(), false)))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    // Hermes cannot consume fixture work either.
+    test.review(Uuid::new_v4()).await;
+    let key = DeviceKey::from_bytes(&[74; 32]);
+    let id = test.agent(&key, test.owner).await;
+    assert!(test.work(&key, id, 1).await.is_none());
+    assert!(test.work(&fixture_key, fixture_device, 2).await.is_some());
+    test.finish().await;
+}
+
+#[tokio::test]
+async fn renewal_replay_is_read_only_and_fresh_sequences_stop_at_the_fixed_deadline() {
+    let test = TestApp::new().await;
+    test.agent_review().await;
+    let key = DeviceKey::from_bytes(&[75; 32]);
+    let id = test.agent(&key, test.owner).await;
+    let work = test.work(&key, id, 1).await.unwrap();
+    sqlx::query("UPDATE work_leases SET expires_at = now() + interval '20 seconds' WHERE id = $1")
+        .bind(work.lease_id)
+        .execute(&test.pool)
+        .await
+        .unwrap();
+    let (a, b) = tokio::join!(
+        test.renew(&key, id, work.lease_id, 1),
+        test.renew(&key, id, work.lease_id, 1)
+    );
+    assert_eq!(a.0, StatusCode::OK, "{}", a.1);
+    assert_eq!(b.0, StatusCode::OK, "{}", b.1);
+    assert_ne!(a.1["replayed"], b.1["replayed"]);
+    assert_eq!(a.1["expires_at"], b.1["expires_at"]);
+    let first: WorkRenewed = serde_json::from_value(a.1).unwrap();
+    assert!(first.valid_for_seconds > 50 && first.valid_for_seconds <= 60);
+    assert!(first.deadline_at - first.expires_at <= 540);
+    assert!(first.deadline_at - first.expires_at >= 535);
+
+    // Advance expiry without sleeping: a duplicate must report the remaining
+    // time, not hand the client another minute from its receive time.
+    sqlx::query("UPDATE work_leases SET expires_at = now() + interval '10 seconds' WHERE id = $1")
+        .bind(work.lease_id)
+        .execute(&test.pool)
+        .await
+        .unwrap();
+    let replay = test.renew(&key, id, work.lease_id, 1).await;
+    assert_eq!(replay.0, StatusCode::OK);
+    assert_eq!(replay.1["replayed"], true);
+    assert!(replay.1["valid_for_seconds"].as_u64().unwrap() <= 10);
+    sqlx::query("UPDATE work_leases SET deadline_at = now() + interval '20 seconds' WHERE id = $1")
+        .bind(work.lease_id)
+        .execute(&test.pool)
+        .await
+        .unwrap();
+    let renewed = test.renew(&key, id, work.lease_id, 2).await;
+    assert_eq!(renewed.0, StatusCode::OK);
+    assert_eq!(renewed.1["expires_at"], renewed.1["deadline_at"]);
+    assert!(renewed.1["valid_for_seconds"].as_u64().unwrap() <= 20);
+    assert_eq!(
+        test.renew(&key, id, work.lease_id, 1).await.0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        test.renew(&key, id, work.lease_id, 0).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        test.renew(&key, id, work.lease_id, u64::MAX).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    test.finish().await;
+}
+
+#[tokio::test]
+async fn renewal_cannot_revive_paused_stale_expired_replaced_cancelled_or_revoked_work() {
+    let test = TestApp::new().await;
+    let review = test.agent_review().await;
+    let key = DeviceKey::from_bytes(&[76; 32]);
+    let other_key = DeviceKey::from_bytes(&[77; 32]);
+    let id = test.agent(&key, test.owner).await;
+    let other_id = test.agent(&other_key, test.owner).await;
+    let first = test.work(&key, id, 1).await.unwrap();
+    assert_eq!(
+        test.renew(&other_key, id, first.lease_id, 1).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        test.renew(&other_key, other_id, first.lease_id, 1).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let heartbeat_path = format!("/v1/devices/{id}/heartbeat");
+    test.signed(
+        &key,
+        &heartbeat_path,
+        Heartbeat {
+            sequence: 2,
+            paused: true,
+            running: 1,
+        },
+    )
+    .await;
+    assert_eq!(
+        test.renew(&key, id, first.lease_id, 1).await.0,
+        StatusCode::CONFLICT
+    );
+    test.signed(
+        &key,
+        &heartbeat_path,
+        Heartbeat {
+            sequence: 3,
+            paused: false,
+            running: 1,
+        },
+    )
+    .await;
+    sqlx::query("UPDATE devices SET last_seen_at = now() - interval '31 seconds' WHERE id = $1")
+        .bind(id)
+        .execute(&test.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        test.renew(&key, id, first.lease_id, 1).await.0,
+        StatusCode::CONFLICT
+    );
+    test.signed(
+        &key,
+        &heartbeat_path,
+        Heartbeat {
+            sequence: 4,
+            paused: false,
+            running: 1,
+        },
+    )
+    .await;
+    assert_eq!(
+        test.renew(&key, id, first.lease_id, 1).await.0,
+        StatusCode::OK
+    );
+    sqlx::query("UPDATE work_leases SET expires_at = now() - interval '1 second' WHERE id = $1")
+        .bind(first.lease_id)
+        .execute(&test.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        test.renew(&key, id, first.lease_id, 2).await.0,
+        StatusCode::CONFLICT
+    );
+    let next = test.work(&key, id, 2).await.unwrap();
+    assert_ne!(next.lease_id, first.lease_id);
+    assert_eq!(
+        test.renew(&key, id, first.lease_id, 2).await.0,
+        StatusCode::CONFLICT
+    );
+    test.request(
+        "POST",
+        &format!("/internal/reviews/{}/cancel", review.id),
+        json!({}),
+        Some((test.owner, false)),
+    )
+    .await;
+    assert_eq!(
+        test.renew(&key, id, next.lease_id, 1).await.0,
+        StatusCode::CONFLICT
+    );
+    test.agent_review().await;
+    let next = test.work(&key, id, 3).await.unwrap();
+    test.request(
+        "POST",
+        &format!("/internal/devices/{id}/decision"),
+        json!({"action":"revoke", "reason":"Test revocation"}),
+        Some((test.owner, false)),
+    )
+    .await;
+    assert_eq!(
+        test.renew(&key, id, next.lease_id, 1).await.0,
+        StatusCode::FORBIDDEN
+    );
+    test.finish().await;
+}
+
+#[tokio::test]
+async fn renewals_cannot_extend_the_review_or_a_fixture_attempt() {
+    let test = TestApp::new().await;
+    let review = test.agent_review().await;
+    let key = DeviceKey::from_bytes(&[78; 32]);
+    let id = test.agent(&key, test.owner).await;
+    let work = test.work(&key, id, 1).await.unwrap();
+    sqlx::query("UPDATE reviews SET deadline_at = now() + interval '15 seconds' WHERE id = $1")
+        .bind(review.id)
+        .execute(&test.pool)
+        .await
+        .unwrap();
+    let response = test.renew(&key, id, work.lease_id, 1).await;
+    assert_eq!(response.0, StatusCode::OK);
+    assert!(response.1["valid_for_seconds"].as_u64().unwrap() <= 15);
+    assert_eq!(response.1["expires_at"], response.1["deadline_at"]);
+    sqlx::query("UPDATE reviews SET deadline_at = now() - interval '1 second' WHERE id = $1")
+        .bind(review.id)
+        .execute(&test.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        test.renew(&key, id, work.lease_id, 2).await.0,
+        StatusCode::CONFLICT
+    );
+    assert!(test.work(&key, id, 2).await.is_none());
+    let response = test
+        .request(
+            "GET",
+            &format!("/internal/reviews/{}", review.id),
+            Value::Null,
+            Some((test.owner, false)),
+        )
+        .await;
+    assert_eq!(response.1["state"], "failed");
+
+    test.review(Uuid::new_v4()).await;
+    let key = DeviceKey::from_bytes(&[79; 32]);
+    let id = test.online(&key).await;
+    let work = test.work(&key, id, 1).await.unwrap();
+    let renewed = test.renew(&key, id, work.lease_id, 1).await;
+    assert_eq!(renewed.0, StatusCode::OK);
+    assert_eq!(renewed.1["expires_at"].as_i64(), Some(work.expires_at));
+    assert_eq!(renewed.1["deadline_at"].as_i64(), Some(work.expires_at));
+    test.finish().await;
+}
+
+#[tokio::test]
+async fn compute_group_names_cannot_reserve_another_operators_capacity() {
+    let test = TestApp::new().await;
+    test.agent_review().await;
+    test.agent_review().await;
+    let a = DeviceKey::from_bytes(&[80; 32]);
+    let b = DeviceKey::from_bytes(&[81; 32]);
+    let a_id = test.agent(&a, test.owner).await;
+    let b_id = test.agent(&b, Uuid::new_v4()).await;
+    let (a_work, b_work) = tokio::join!(test.work(&a, a_id, 1), test.work(&b, b_id, 1));
+    assert!(a_work.is_some() && b_work.is_some());
+    assert_ne!(a_work.unwrap().review_id, b_work.unwrap().review_id);
+    let fleet = test.request("GET", "/v1/fleet", Value::Null, None).await;
+    assert_eq!(fleet.0, StatusCode::OK);
+    assert_eq!(fleet.1["online_operators"], 2);
+    assert_eq!(fleet.1["online_compute_groups"], 2);
+    test.finish().await;
+}
+
+#[tokio::test]
+async fn confident_agent_prose_without_tool_observations_stays_needs_review() {
+    let test = TestApp::new().await;
+    let review = test.agent_review().await;
+    for seed in 82..85 {
+        let key = DeviceKey::from_bytes(&[seed; 32]);
+        let id = test.agent(&key, test.owner).await;
+        let work = test.work(&key, id, 1).await.unwrap();
+        let mut result = agent_result();
+        if seed == 83 {
+            result.observation = None;
+            result.terminal_calls = 0;
+        }
+        let response = test
+            .signed(
+                &key,
+                &format!("/v1/devices/{id}/work/complete"),
+                CompleteWork {
+                    lease_id: work.lease_id,
+                    result: WorkResult::Agent(result),
+                },
+            )
+            .await;
+        assert_eq!(response.0, StatusCode::OK, "{}", response.1);
+        assert_eq!(response.1["fixture_matches"], seed != 83);
+    }
+    let response = test
+        .request(
+            "GET",
+            &format!("/internal/reviews/{}", review.id),
+            Value::Null,
+            Some((test.owner, false)),
+        )
+        .await;
+    assert_eq!(response.1["state"], "needs_review");
+    assert_eq!(response.1["steps"][1]["fixture_matches"], false);
+    test.finish().await;
+}
+
+#[tokio::test]
+async fn a_hard_deadline_ends_work_even_with_a_recent_heartbeat_and_unexpired_soft_lease() {
+    let test = TestApp::new().await;
+    test.agent_review().await;
+    let key = DeviceKey::from_bytes(&[85; 32]);
+    let id = test.agent(&key, test.owner).await;
+    let work = test.work(&key, id, 1).await.unwrap();
+    sqlx::query("UPDATE work_leases SET deadline_at = now() - interval '1 second' WHERE id = $1")
+        .bind(work.lease_id)
+        .execute(&test.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        test.renew(&key, id, work.lease_id, 1).await.0,
+        StatusCode::CONFLICT
+    );
+    let result = CompleteWork {
+        lease_id: work.lease_id,
+        result: WorkResult::Agent(agent_result()),
+    };
+    assert_eq!(
+        test.signed(&key, &format!("/v1/devices/{id}/work/complete"), result)
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    let replacement = test.work(&key, id, 2).await.unwrap();
+    assert_ne!(replacement.lease_id, work.lease_id);
     test.finish().await;
 }

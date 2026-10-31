@@ -1,5 +1,5 @@
-//! A deliberately small queue for owned fixtures. No customer source, model calls
-//! or payments enter this path. Leases bound retries and fence late results.
+//! A small queue for owned examples, run as deterministic fixtures or by agents.
+//! No customer source or payments enter this path. Leases fence late results.
 
 use crate::{Actor, ApiError, AppState, actor, now, verify};
 use axum::{
@@ -24,7 +24,7 @@ async fn scheduler(tx: &mut Tx<'_>) -> Result<(), ApiError> {
 }
 
 async fn sweep(tx: &mut Tx<'_>) -> Result<(), ApiError> {
-    sqlx::query("UPDATE work_leases l SET state = 'expired' FROM review_steps s, reviews r, devices d WHERE l.state = 'active' AND s.id = l.step_id AND r.id = s.review_id AND d.id = l.device_id AND (l.expires_at <= now() OR r.deadline_at <= now() OR d.approval <> 'approved')")
+    sqlx::query("UPDATE work_leases l SET state = 'expired' FROM review_steps s, reviews r, devices d WHERE l.state = 'active' AND s.id = l.step_id AND r.id = s.review_id AND d.id = l.device_id AND (l.expires_at <= now() OR l.deadline_at <= now() OR r.deadline_at <= now() OR d.approval <> 'approved')")
         .execute(&mut **tx).await?;
     sqlx::query("UPDATE review_steps s SET state = CASE WHEN attempts < 3 THEN 'queued' ELSE 'failed' END FROM work_leases l WHERE s.current_lease_id = l.id AND s.state = 'leased' AND l.state = 'expired'")
         .execute(&mut **tx).await?;
@@ -50,6 +50,7 @@ struct ReviewRow {
     id: Uuid,
     request_id: Uuid,
     state: String,
+    mode: String,
     created_at: DateTime<Utc>,
     deadline_at: DateTime<Utc>,
 }
@@ -63,7 +64,7 @@ struct StepRow {
     device_id: Option<Uuid>,
     operator_id: Option<Uuid>,
     compute_group: Option<String>,
-    result: Option<DbJson<FixtureResult>>,
+    result: Option<DbJson<WorkResult>>,
     fixture_matches: Option<bool>,
 }
 
@@ -78,7 +79,7 @@ async fn views(
     caller: &Actor,
     id: Option<Uuid>,
 ) -> Result<Vec<ReviewView>, ApiError> {
-    let reviews = sqlx::query_as::<_, ReviewRow>("SELECT id, request_id, state, created_at, deadline_at FROM reviews WHERE (requester_id = $1 OR $2) AND ($3::uuid IS NULL OR id = $3) ORDER BY created_at DESC LIMIT 50")
+    let reviews = sqlx::query_as::<_, ReviewRow>("SELECT id, request_id, state, mode, created_at, deadline_at FROM reviews WHERE (requester_id = $1 OR $2) AND ($3::uuid IS NULL OR id = $3) ORDER BY created_at DESC LIMIT 50")
         .bind(caller.id).bind(caller.admin).bind(id).fetch_all(pool).await?;
     let ids: Vec<_> = reviews.iter().map(|r| r.id).collect();
     let steps = sqlx::query_as::<_, StepRow>("SELECT s.review_id, s.role, s.state, s.attempts, l.device_id, l.operator_id, l.compute_group, CASE WHEN $2 THEN s.result ELSE NULL END AS result, s.fixture_matches FROM review_steps s LEFT JOIN work_leases l ON l.id = s.current_lease_id WHERE s.review_id = ANY($1) ORDER BY s.position")
@@ -102,11 +103,15 @@ async fn views(
             id: review.id,
             request_id: review.request_id,
             scenario: FixtureScenario::AccessControlV1,
-            mode: "owned_fixture".into(),
+            evidence_source: if review.mode == "owned_agent" {
+                "agent_reported_owned_example_not_independently_verified".into()
+            } else {
+                "device_reported_fixture_not_independently_verified".into()
+            },
+            mode: review.mode,
             state: review.state,
             created_at: review.created_at.timestamp(),
             deadline_at: review.deadline_at.timestamp(),
-            evidence_source: "device_reported_fixture_not_independently_verified".into(),
             steps: parts,
         });
     }
@@ -129,13 +134,16 @@ pub async fn create(
     let mut tx = state.pool.begin().await?;
     scheduler(&mut tx).await?;
     sweep(&mut tx).await?;
-    let existing: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM reviews WHERE requester_id = $1 AND request_id = $2")
+    let existing: Option<(Uuid, String)> =
+        sqlx::query_as("SELECT id, mode FROM reviews WHERE requester_id = $1 AND request_id = $2")
             .bind(caller.id)
             .bind(input.request_id)
             .fetch_optional(&mut *tx)
             .await?;
-    if let Some(id) = existing {
+    if let Some((id, mode)) = existing {
+        if mode != input.mode.as_str() {
+            return Err(ApiError::conflict("conflicting_review_request"));
+        }
         tx.commit().await?;
         return Ok(Json(view(&state.pool, &caller, id).await?));
     }
@@ -148,8 +156,15 @@ pub async fn create(
         ));
     }
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO reviews (id, requester_id, request_id, scenario) VALUES ($1,$2,$3,'access_control_v1')")
-        .bind(id).bind(caller.id).bind(input.request_id).execute(&mut *tx).await?;
+    // Three sequential CPU roles can each take ten minutes. The overall deadline
+    // also bounds waiting and retries; renewal never moves either deadline.
+    let minutes: i32 = if input.mode == ReviewMode::OwnedAgent {
+        35
+    } else {
+        15
+    };
+    sqlx::query("INSERT INTO reviews (id, requester_id, request_id, scenario, mode, deadline_at) VALUES ($1,$2,$3,'access_control_v1',$4,now() + make_interval(mins => $5))")
+        .bind(id).bind(caller.id).bind(input.request_id).bind(input.mode.as_str()).bind(minutes).execute(&mut *tx).await?;
     for (position, role) in [
         ReviewRole::Investigator,
         ReviewRole::Reproducer,
@@ -239,7 +254,7 @@ async fn worker(tx: &mut Tx<'_>, id: Uuid, key: &str) -> Result<Worker, ApiError
     if worker.public_key != key {
         return Err(ApiError::denied());
     }
-    if worker.approval != "approved" || worker.introduction.runtime != RuntimeKind::OwnedFixture {
+    if worker.approval != "approved" {
         return Err(ApiError::new(StatusCode::FORBIDDEN, "device_not_eligible"));
     }
     Ok(worker)
@@ -251,6 +266,7 @@ struct AssignmentRow {
     review_id: Uuid,
     role: String,
     expires_at: DateTime<Utc>,
+    mode: String,
 }
 impl AssignmentRow {
     fn assignment(self) -> Result<WorkAssignment, ApiError> {
@@ -260,6 +276,7 @@ impl AssignmentRow {
             role: role(&self.role)?,
             scenario: FixtureScenario::AccessControlV1,
             expires_at: self.expires_at.timestamp(),
+            mode: serde_json::from_value(serde_json::Value::String(self.mode))?,
         })
     }
 }
@@ -278,6 +295,10 @@ pub async fn poll(
     scheduler(&mut tx).await?;
     sweep(&mut tx).await?;
     let device = worker(&mut tx, id, &request.public_key).await?;
+    let mode = match device.introduction.runtime {
+        RuntimeKind::OwnedFixture => ReviewMode::OwnedFixture,
+        RuntimeKind::Hermes => ReviewMode::OwnedAgent,
+    };
     if seq as i64 == device.work_sequence {
         let reply = device
             .work_reply
@@ -295,22 +316,27 @@ pub async fn poll(
             .last_seen_at
             .is_some_and(|seen| now() - seen.timestamp() < 30)
     {
-        let existing = sqlx::query_as::<_, AssignmentRow>("SELECT l.id, s.review_id, s.role, l.expires_at FROM work_leases l JOIN review_steps s ON s.id = l.step_id WHERE l.device_id = $1 AND l.state = 'active'")
+        let existing = sqlx::query_as::<_, AssignmentRow>("SELECT l.id, s.review_id, s.role, l.expires_at, r.mode FROM work_leases l JOIN review_steps s ON s.id = l.step_id JOIN reviews r ON r.id = s.review_id WHERE l.device_id = $1 AND l.state = 'active'")
             .bind(id).fetch_optional(&mut *tx).await?;
         if let Some(existing) = existing {
             assignment = Some(existing.assignment()?);
         } else {
-            let busy: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM work_leases WHERE compute_group = $1 AND state = 'active')")
-                .bind(&device.introduction.compute_group).fetch_one(&mut *tx).await?;
+            let busy: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM work_leases WHERE compute_group = $1 AND operator_id = $2 AND state = 'active')")
+                .bind(&device.introduction.compute_group).bind(device.operator_id).fetch_one(&mut *tx).await?;
             if !busy {
                 // Three distinct devices, sequential roles, and one shared-compute
                 // slot. Actual operator independence is reported, never assumed.
-                let step: Option<(Uuid, Uuid, String)> = sqlx::query_as("SELECT s.id, s.review_id, s.role FROM review_steps s JOIN reviews r ON r.id = s.review_id WHERE s.state = 'queued' AND r.state IN ('queued','running') AND r.deadline_at > now() AND NOT EXISTS (SELECT 1 FROM review_steps previous WHERE previous.review_id = r.id AND previous.position < s.position AND previous.state <> 'completed') AND NOT EXISTS (SELECT 1 FROM review_steps used JOIN work_leases l ON l.id = used.current_lease_id WHERE used.review_id = r.id AND used.state = 'completed' AND l.device_id = $1) ORDER BY r.created_at, s.position LIMIT 1 FOR UPDATE OF s")
-                    .bind(id).fetch_optional(&mut *tx).await?;
+                let step: Option<(Uuid, Uuid, String)> = sqlx::query_as("SELECT s.id, s.review_id, s.role FROM review_steps s JOIN reviews r ON r.id = s.review_id WHERE s.state = 'queued' AND r.state IN ('queued','running') AND r.mode = $2 AND r.deadline_at > now() AND NOT EXISTS (SELECT 1 FROM review_steps previous WHERE previous.review_id = r.id AND previous.position < s.position AND previous.state <> 'completed') AND NOT EXISTS (SELECT 1 FROM review_steps used JOIN work_leases l ON l.id = used.current_lease_id WHERE used.review_id = r.id AND used.state = 'completed' AND l.device_id = $1) ORDER BY r.created_at, s.position LIMIT 1 FOR UPDATE OF s")
+                    .bind(id).bind(mode.as_str()).fetch_optional(&mut *tx).await?;
                 if let Some((step_id, review_id, step_role)) = step {
                     let lease = Uuid::new_v4();
-                    let expires: DateTime<Utc> = sqlx::query_scalar("INSERT INTO work_leases (id, step_id, device_id, operator_id, compute_group, expires_at) VALUES ($1,$2,$3,$4,$5,LEAST(now() + interval '60 seconds', (SELECT deadline_at FROM reviews WHERE id = $6))) RETURNING expires_at")
-                        .bind(lease).bind(step_id).bind(id).bind(device.operator_id).bind(&device.introduction.compute_group).bind(review_id).fetch_one(&mut *tx).await?;
+                    let seconds: i32 = if mode == ReviewMode::OwnedAgent {
+                        600
+                    } else {
+                        60
+                    };
+                    let expires: DateTime<Utc> = sqlx::query_scalar("INSERT INTO work_leases (id, step_id, device_id, operator_id, compute_group, expires_at, deadline_at) SELECT $1,$2,$3,$4,$5,LEAST(now() + interval '60 seconds', deadline_at),LEAST(now() + make_interval(secs => $7), deadline_at) FROM reviews WHERE id = $6 RETURNING expires_at")
+                        .bind(lease).bind(step_id).bind(id).bind(device.operator_id).bind(&device.introduction.compute_group).bind(review_id).bind(f64::from(seconds)).fetch_one(&mut *tx).await?;
                     sqlx::query("UPDATE review_steps SET state = 'leased', attempts = attempts + 1, current_lease_id = $1 WHERE id = $2")
                         .bind(lease).bind(step_id).execute(&mut *tx).await?;
                     sqlx::query("UPDATE reviews SET state = 'running' WHERE id = $1")
@@ -323,6 +349,7 @@ pub async fn poll(
                         role: role(&step_role)?,
                         scenario: FixtureScenario::AccessControlV1,
                         expires_at: expires.timestamp(),
+                        mode,
                     });
                 }
             }
@@ -346,9 +373,75 @@ struct LeaseRow {
     review_id: Uuid,
     state: String,
     expires_at: DateTime<Utc>,
+    deadline_at: DateTime<Utc>,
+    renewal_sequence: i64,
+    mode: String,
     result_hash: Option<String>,
     fixture_matches: Option<bool>,
     current_lease_id: Option<Uuid>,
+}
+
+async fn lease(tx: &mut Tx<'_>, id: Uuid) -> Result<LeaseRow, ApiError> {
+    sqlx::query_as::<_, LeaseRow>("SELECT l.step_id, l.device_id, s.review_id, l.state, l.expires_at, LEAST(l.deadline_at, r.deadline_at) AS deadline_at, l.renewal_sequence, r.mode, l.result_hash, l.fixture_matches, s.current_lease_id FROM work_leases l JOIN review_steps s ON s.id = l.step_id JOIN reviews r ON r.id = s.review_id WHERE l.id = $1 FOR UPDATE OF l, s")
+        .bind(id).fetch_optional(&mut **tx).await?.ok_or_else(ApiError::missing)
+}
+
+fn active(lease: &LeaseRow, device_id: Uuid, lease_id: Uuid) -> Result<(), ApiError> {
+    if lease.device_id != device_id {
+        return Err(ApiError::denied());
+    }
+    if lease.state != "active"
+        || lease.expires_at <= Utc::now()
+        || lease.deadline_at <= Utc::now()
+        || lease.current_lease_id != Some(lease_id)
+    {
+        return Err(ApiError::conflict("lease_no_longer_active"));
+    }
+    Ok(())
+}
+
+pub async fn renew(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<SignedRequest<RenewWork>>,
+) -> Result<Json<WorkRenewed>, ApiError> {
+    verify(&request, &state, &format!("/v1/devices/{id}/work/renew"))?;
+    let input = request.payload;
+    if input.sequence == 0 || input.sequence > i64::MAX as u64 {
+        return Err(ApiError::bad("invalid_sequence"));
+    }
+    let mut tx = state.pool.begin().await?;
+    scheduler(&mut tx).await?;
+    sweep(&mut tx).await?;
+    let device = worker(&mut tx, id, &request.public_key).await?;
+    let current = lease(&mut tx, input.lease_id).await?;
+    active(&current, id, input.lease_id)?;
+    if device.paused
+        || device
+            .last_seen_at
+            .is_none_or(|seen| now() - seen.timestamp() >= 30)
+    {
+        return Err(ApiError::conflict("device_not_ready"));
+    }
+    if (input.sequence as i64) < current.renewal_sequence {
+        return Err(ApiError::conflict("stale_renewal"));
+    }
+    let replayed = input.sequence as i64 == current.renewal_sequence;
+    let expires = if replayed {
+        current.expires_at
+    } else {
+        sqlx::query_scalar("UPDATE work_leases SET expires_at = LEAST(now() + interval '60 seconds', $1), renewal_sequence = $2 WHERE id = $3 RETURNING expires_at")
+            .bind(current.deadline_at).bind(input.sequence as i64).bind(input.lease_id).fetch_one(&mut *tx).await?
+    };
+    tx.commit().await?;
+    Ok(Json(WorkRenewed {
+        lease_id: input.lease_id,
+        sequence: input.sequence,
+        expires_at: expires.timestamp(),
+        deadline_at: current.deadline_at.timestamp(),
+        valid_for_seconds: (expires - Utc::now()).num_seconds().max(0) as u64,
+        replayed,
+    }))
 }
 
 pub async fn complete(
@@ -362,9 +455,8 @@ pub async fn complete(
     let mut tx = state.pool.begin().await?;
     scheduler(&mut tx).await?;
     sweep(&mut tx).await?;
-    worker(&mut tx, id, &request.public_key).await?;
-    let lease = sqlx::query_as::<_, LeaseRow>("SELECT l.step_id, l.device_id, s.review_id, l.state, l.expires_at, l.result_hash, l.fixture_matches, s.current_lease_id FROM work_leases l JOIN review_steps s ON s.id = l.step_id WHERE l.id = $1 FOR UPDATE OF l, s")
-        .bind(input.lease_id).fetch_optional(&mut *tx).await?.ok_or_else(ApiError::missing)?;
+    let device = worker(&mut tx, id, &request.public_key).await?;
+    let lease = lease(&mut tx, input.lease_id).await?;
     if lease.device_id != id {
         return Err(ApiError::denied());
     }
@@ -379,11 +471,15 @@ pub async fn complete(
             fixture_matches: lease.fixture_matches.unwrap_or(false),
         }));
     }
-    if lease.state != "active"
-        || lease.expires_at <= Utc::now()
-        || lease.current_lease_id != Some(input.lease_id)
+    active(&lease, id, input.lease_id)?;
+    if input.result.mode().as_str() != lease.mode {
+        return Err(ApiError::bad("wrong_result_kind"));
+    }
+    if let WorkResult::Agent(result) = &input.result
+        && (!result.valid()
+            || device.introduction.declared_model.as_deref() != Some(&result.declared_model))
     {
-        return Err(ApiError::conflict("lease_no_longer_active"));
+        return Err(ApiError::bad("invalid_agent_evidence"));
     }
     let matches = input.result.matches_fixture();
     sqlx::query("UPDATE work_leases SET state = 'completed', result_hash = $1, fixture_matches = $2 WHERE id = $3")

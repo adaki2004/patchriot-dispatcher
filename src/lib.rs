@@ -1,6 +1,7 @@
 //! Device admission and liveness. Customer work is not enabled by pairing alone.
 
 mod devices;
+mod reviews;
 
 use axum::{
     Json, Router,
@@ -76,6 +77,14 @@ pub fn router(state: AppState) -> Router {
         .route("/internal/pairings/claim", post(devices::claim))
         .route("/internal/devices", get(devices::list))
         .route("/internal/devices/{id}/decision", post(devices::decision))
+        .route(
+            "/internal/reviews",
+            get(reviews::list).post(reviews::create),
+        )
+        .route("/internal/reviews/{id}", get(reviews::get))
+        .route("/internal/reviews/{id}/cancel", post(reviews::cancel))
+        .route("/v1/devices/{id}/work/poll", post(reviews::poll))
+        .route("/v1/devices/{id}/work/complete", post(reviews::complete))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(SetResponseHeaderLayer::overriding(
             header::CACHE_CONTROL,

@@ -2,7 +2,7 @@
 
 The private Rust service for approving review scope, pairing machines, assigning work, checking findings and delivering private evidence.
 
-**Status:** the Rust device-onboarding service is implemented: signed pairing, PostgreSQL persistence, operator claims, separate admin approval, presence, pause and revocation. Work dispatch, model execution and private review delivery remain planned. Use one modular service, Postgres and private artifact storage; add processes only when isolation or scheduling needs them.
+**Status:** signed device onboarding and a bounded owned-fixture review queue are implemented. Pairing, manual approval, presence, leases, reports and revocation persist in PostgreSQL. The queue does not accept customer source, websites, model instructions or payments. Model execution and customer review delivery remain planned.
 
 **DON'T TRUST! VERIFY!** Inspect implementation and test evidence. Private source, a signed result or an agent's confidence is not a security guarantee.
 
@@ -27,6 +27,18 @@ Internal requests require `Authorization: Bearer <service secret>`, `X-Patchriot
 For tests, set `PATCHRIOT_TEST_DATABASE_URL` to a local PostgreSQL database where the test role can create schemas, then run `cargo test --locked --all-targets`. Tests use distinct generated schemas and remove them after success. They exercise simultaneous claims, approval/revocation, signature and account boundaries, heartbeat replays, expiry and anonymous admission limits. `cargo fmt --all --check` and `cargo clippy --locked --all-targets -- -D warnings` complete the local checks. The core smoke script runs three real relay instances through this API without calling a model.
 
 CI uses a disposable PostgreSQL service and a pinned core protocol commit. If core is private, set the `PATCHRIOT_READ_TOKEN` repository secret to a token with read-only access to core; the default GitHub token can read a public core repository.
+
+## Owned-fixture reviews
+
+The first queue accepts only `access_control_v1`, an example compiled into the relay. It demonstrates an access-control flaw, a patch and a clean control. Each review has investigator, reproducer and challenger roles, assigned sequentially to three distinct approved devices. They may belong to one operator or share a computer; reports retain those identities instead of implying independence. Device-reported evidence is not independent verification or an assessment of a customer's system.
+
+Core can create a review with `POST /internal/reviews` and `{ "request_id": "<uuid>", "scenario": "access_control_v1" }`. The requester and request ID deduplicate creation. `GET /internal/reviews`, `GET /internal/reviews/:id` and `POST /internal/reviews/:id/cancel` are account-scoped; administrators can inspect the prototype queue. Cancellation takes an empty JSON object. The same authenticated core headers as device management are required.
+
+Approved relays opt into fixture work and sign `POST /v1/devices/:id/work/poll` with a persistent sequence. An assignment contains its lease, role, fixed scenario and deadline. It never contains a shell command. Only one lease can occupy a device or declared compute group. Poll retries return the same assignment without extending its 60-second lease. A failed attempt can be replaced up to three times; an old result cannot complete its replacement. Each review expires after 15 minutes. Expiry is processed during polling and authenticated queue reads.
+
+Signed `POST /v1/devices/:id/work/complete` binds the result to the lease and device. Exact retries are accepted once; changed, expired, cancelled or revoked results are rejected. All three roles must report the expected original failure and passing patch/control before the fixture review is `completed`. Contradictions produce `needs_review`; missing evidence cannot become a successful report. Completed means the fixture workflow finished, not that a system is safe.
+
+The prototype admits at most three active fixture reviews per account and 30 overall. Tests cover simultaneous polling, shared-compute capacity, replay, expiry, retry exhaustion, cancellation, revocation, account isolation and conflicting evidence. These bounds are for the local fixture pilot; customer work will need separately agreed scope, capacity, privacy and payment terms.
 
 ## Service boundary
 

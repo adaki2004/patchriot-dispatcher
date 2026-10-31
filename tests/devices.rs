@@ -172,6 +172,69 @@ impl TestApp {
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
     }
+
+    async fn online(&self, key: &DeviceKey) -> Uuid {
+        let id = self.paired(key).await;
+        self.approve(id).await;
+        let response = self
+            .signed(
+                key,
+                &format!("/v1/devices/{id}/heartbeat"),
+                Heartbeat {
+                    sequence: 1,
+                    paused: false,
+                    running: 0,
+                },
+            )
+            .await;
+        assert_eq!(response.0, StatusCode::OK, "{}", response.1);
+        id
+    }
+
+    async fn review(&self, request_id: Uuid) -> ReviewView {
+        let response = self
+            .request(
+                "POST",
+                "/internal/reviews",
+                json!({"request_id":request_id,"scenario":"access_control_v1"}),
+                Some((self.owner, false)),
+            )
+            .await;
+        assert_eq!(response.0, StatusCode::OK, "{}", response.1);
+        serde_json::from_value(response.1).unwrap()
+    }
+
+    async fn work(&self, key: &DeviceKey, id: Uuid, sequence: u64) -> Option<WorkAssignment> {
+        let response = self
+            .signed(
+                key,
+                &format!("/v1/devices/{id}/work/poll"),
+                WorkPoll { sequence },
+            )
+            .await;
+        assert_eq!(response.0, StatusCode::OK, "{}", response.1);
+        serde_json::from_value::<WorkReply>(response.1)
+            .unwrap()
+            .assignment
+    }
+
+    async fn complete_work(
+        &self,
+        key: &DeviceKey,
+        id: Uuid,
+        lease: Uuid,
+        result: FixtureResult,
+    ) -> (StatusCode, Value) {
+        self.signed(
+            key,
+            &format!("/v1/devices/{id}/work/complete"),
+            CompleteWork {
+                lease_id: lease,
+                result,
+            },
+        )
+        .await
+    }
 }
 
 #[tokio::test]
@@ -483,6 +546,398 @@ async fn anonymous_pairing_growth_and_request_size_are_bounded() {
     assert_eq!(
         test.app.clone().oneshot(request).await.unwrap().status(),
         StatusCode::PAYLOAD_TOO_LARGE
+    );
+    test.finish().await;
+}
+
+fn fixture_result() -> FixtureResult {
+    FixtureResult {
+        runs: [
+            FixtureVersion::Original,
+            FixtureVersion::Patched,
+            FixtureVersion::Clean,
+        ]
+        .into_iter()
+        .map(|version| FixtureRun {
+            version,
+            completed: true,
+            elapsed_ms: 10,
+            checks: [
+                FixtureCheck {
+                    name: "owner_can_read".into(),
+                    expected: true,
+                    actual: true,
+                },
+                FixtureCheck {
+                    name: "another_user_can_read".into(),
+                    expected: false,
+                    actual: version == FixtureVersion::Original,
+                },
+                FixtureCheck {
+                    name: "anonymous_can_read".into(),
+                    expected: false,
+                    actual: false,
+                },
+            ]
+            .into(),
+        })
+        .collect(),
+    }
+}
+
+#[tokio::test]
+async fn queued_fixture_uses_three_distinct_devices_and_preserves_requester_privacy() {
+    let test = TestApp::new().await;
+    let request = Uuid::new_v4();
+    let review = test.review(request).await;
+    assert_eq!(review.id, test.review(request).await.id);
+    assert_eq!(review.steps.len(), 3);
+    for seed in 51..54 {
+        let key = DeviceKey::from_bytes(&[seed; 32]);
+        let id = test.online(&key).await;
+        let assignment = test.work(&key, id, 1).await.unwrap();
+        assert_eq!(assignment.review_id, review.id);
+        let (status, body) = test
+            .complete_work(&key, id, assignment.lease_id, fixture_result())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["fixture_matches"], true);
+        // One device cannot fill the other review roles, even with spare capacity.
+        assert!(test.work(&key, id, 2).await.is_none());
+    }
+    let path = format!("/internal/reviews/{}", review.id);
+    let (status, body) = test
+        .request("GET", &path, Value::Null, Some((test.owner, false)))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let view: ReviewView = serde_json::from_value(body).unwrap();
+    assert_eq!(view.state, "completed");
+    assert_eq!(view.mode, "owned_fixture");
+    assert_eq!(
+        view.evidence_source,
+        "device_reported_fixture_not_independently_verified"
+    );
+    assert_eq!(
+        view.steps
+            .iter()
+            .filter_map(|s| s.device_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3
+    );
+    assert_eq!(
+        view.steps
+            .iter()
+            .filter_map(|s| s.operator_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        1
+    );
+    let unrelated = Uuid::new_v4();
+    assert_eq!(
+        test.request("GET", &path, Value::Null, Some((unrelated, false)))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        test.request(
+            "POST",
+            &format!("{path}/cancel"),
+            json!({}),
+            Some((unrelated, false))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let (_, body) = test
+        .request(
+            "GET",
+            "/internal/reviews",
+            Value::Null,
+            Some((unrelated, false)),
+        )
+        .await;
+    assert_eq!(body, json!([]));
+    test.finish().await;
+}
+
+#[tokio::test]
+async fn concurrent_polls_share_one_compute_slot_and_replays_do_not_extend_leases() {
+    let test = TestApp::new().await;
+    test.review(Uuid::new_v4()).await;
+    test.review(Uuid::new_v4()).await;
+    let keys = [
+        DeviceKey::from_bytes(&[54; 32]),
+        DeviceKey::from_bytes(&[55; 32]),
+    ];
+    let ids = [test.online(&keys[0]).await, test.online(&keys[1]).await];
+    let (a, b) = tokio::join!(
+        test.work(&keys[0], ids[0], 1),
+        test.work(&keys[1], ids[1], 1)
+    );
+    assert_eq!(usize::from(a.is_some()) + usize::from(b.is_some()), 1);
+    let winner = if a.is_some() { 0 } else { 1 };
+    let assignment = a.or(b).unwrap();
+    let retry = test.work(&keys[winner], ids[winner], 1).await.unwrap();
+    assert_eq!(retry.lease_id, assignment.lease_id);
+    assert_eq!(retry.expires_at, assignment.expires_at);
+    // A new signed poll also returns the current assignment without extending it.
+    let retry = test.work(&keys[winner], ids[winner], 2).await.unwrap();
+    assert_eq!(retry.expires_at, assignment.expires_at);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM work_leases WHERE state = 'active'")
+        .fetch_one(&test.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let stale = test
+        .signed(
+            &keys[winner],
+            &format!("/v1/devices/{}/work/poll", ids[winner]),
+            WorkPoll { sequence: 1 },
+        )
+        .await;
+    assert_eq!(stale.0, StatusCode::CONFLICT);
+    test.finish().await;
+}
+
+#[tokio::test]
+async fn expired_attempt_is_replaced_and_its_late_result_cannot_finish_the_new_attempt() {
+    let test = TestApp::new().await;
+    test.review(Uuid::new_v4()).await;
+    let key = DeviceKey::from_bytes(&[56; 32]);
+    let id = test.online(&key).await;
+    let first = test.work(&key, id, 1).await.unwrap();
+    sqlx::query("UPDATE work_leases SET expires_at = now() - interval '1 second' WHERE id = $1")
+        .bind(first.lease_id)
+        .execute(&test.pool)
+        .await
+        .unwrap();
+    let next = test.work(&key, id, 2).await.unwrap();
+    assert_ne!(first.lease_id, next.lease_id);
+    assert_eq!(first.role, next.role);
+    let late = test
+        .complete_work(&key, id, first.lease_id, fixture_result())
+        .await;
+    assert_eq!(late.0, StatusCode::CONFLICT);
+    let valid = test
+        .complete_work(&key, id, next.lease_id, fixture_result())
+        .await;
+    assert_eq!(valid.0, StatusCode::OK);
+    let retry = test
+        .complete_work(&key, id, next.lease_id, fixture_result())
+        .await;
+    assert_eq!(retry.0, StatusCode::OK);
+    assert_eq!(retry.1["replayed"], true);
+    let mut altered = fixture_result();
+    altered.runs[0].checks[1].actual = false;
+    assert_eq!(
+        test.complete_work(&key, id, next.lease_id, altered).await.0,
+        StatusCode::CONFLICT
+    );
+    let attempts: i32 =
+        sqlx::query_scalar("SELECT attempts FROM review_steps WHERE role = 'investigator'")
+            .fetch_one(&test.pool)
+            .await
+            .unwrap();
+    assert_eq!(attempts, 2);
+    test.finish().await;
+}
+
+#[tokio::test]
+async fn cancelled_or_revoked_work_cannot_submit_results_and_releases_capacity() {
+    let test = TestApp::new().await;
+    let review = test.review(Uuid::new_v4()).await;
+    let key = DeviceKey::from_bytes(&[57; 32]);
+    let id = test.online(&key).await;
+    let assignment = test.work(&key, id, 1).await.unwrap();
+    let cancel = test
+        .request(
+            "POST",
+            &format!("/internal/reviews/{}/cancel", review.id),
+            json!({}),
+            Some((test.owner, false)),
+        )
+        .await;
+    assert_eq!(cancel.0, StatusCode::OK);
+    assert_eq!(cancel.1["state"], "cancelled");
+    assert_eq!(
+        test.complete_work(&key, id, assignment.lease_id, fixture_result())
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    test.review(Uuid::new_v4()).await;
+    let assignment = test.work(&key, id, 2).await.unwrap();
+    let revoke = test
+        .request(
+            "POST",
+            &format!("/internal/devices/{id}/decision"),
+            json!({"action":"revoke","reason":"Test"}),
+            Some((test.owner, false)),
+        )
+        .await;
+    assert_eq!(revoke.0, StatusCode::OK);
+    assert_eq!(
+        test.complete_work(&key, id, assignment.lease_id, fixture_result())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    test.request(
+        "GET",
+        "/internal/reviews",
+        Value::Null,
+        Some((test.owner, false)),
+    )
+    .await;
+    let active: i64 = sqlx::query_scalar("SELECT count(*) FROM work_leases WHERE state = 'active'")
+        .fetch_one(&test.pool)
+        .await
+        .unwrap();
+    assert_eq!(active, 0);
+    test.finish().await;
+}
+
+#[tokio::test]
+async fn queue_capacity_unsupported_targets_and_ineligible_devices_fail_before_assignment() {
+    let test = TestApp::new().await;
+    for _ in 0..3 {
+        test.review(Uuid::new_v4()).await;
+    }
+    let full = test
+        .request(
+            "POST",
+            "/internal/reviews",
+            json!({"request_id":Uuid::new_v4(),"scenario":"access_control_v1"}),
+            Some((test.owner, false)),
+        )
+        .await;
+    assert_eq!(full.0, StatusCode::TOO_MANY_REQUESTS);
+    let forbidden = test.request("POST","/internal/reviews",json!({"request_id":Uuid::new_v4(),"scenario":"access_control_v1","url":"https://unrelated.example"}),Some((test.owner,false))).await;
+    assert_eq!(forbidden.0, StatusCode::UNPROCESSABLE_ENTITY);
+    let anonymous = test
+        .request(
+            "POST",
+            "/internal/reviews",
+            json!({"request_id":Uuid::new_v4(),"scenario":"access_control_v1"}),
+            None,
+        )
+        .await;
+    assert_eq!(anonymous.0, StatusCode::UNAUTHORIZED);
+    let key = DeviceKey::from_bytes(&[58; 32]);
+    let id = test.paired(&key).await;
+    assert_eq!(
+        test.signed(
+            &key,
+            &format!("/v1/devices/{id}/work/poll"),
+            WorkPoll { sequence: 1 }
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    test.approve(id).await;
+    assert!(
+        test.work(&key, id, 1).await.is_none(),
+        "an offline device is not eligible"
+    );
+    test.signed(
+        &key,
+        &format!("/v1/devices/{id}/heartbeat"),
+        Heartbeat {
+            sequence: 1,
+            paused: true,
+            running: 0,
+        },
+    )
+    .await;
+    assert!(
+        test.work(&key, id, 2).await.is_none(),
+        "a paused device is not eligible"
+    );
+    let wrong_key = DeviceKey::from_bytes(&[59; 32]);
+    assert_eq!(
+        test.signed(
+            &wrong_key,
+            &format!("/v1/devices/{id}/work/poll"),
+            WorkPoll { sequence: 3 }
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    test.finish().await;
+}
+
+#[tokio::test]
+async fn missing_workers_exhaust_a_bounded_retry_budget_without_a_success_report() {
+    let test = TestApp::new().await;
+    let review = test.review(Uuid::new_v4()).await;
+    let key = DeviceKey::from_bytes(&[60; 32]);
+    let id = test.online(&key).await;
+    for sequence in 1..=3 {
+        let assignment = test.work(&key, id, sequence).await.unwrap();
+        sqlx::query(
+            "UPDATE work_leases SET expires_at = now() - interval '1 second' WHERE id = $1",
+        )
+        .bind(assignment.lease_id)
+        .execute(&test.pool)
+        .await
+        .unwrap();
+    }
+    assert!(test.work(&key, id, 4).await.is_none());
+    let response = test
+        .request(
+            "GET",
+            &format!("/internal/reviews/{}", review.id),
+            Value::Null,
+            Some((test.owner, false)),
+        )
+        .await;
+    assert_eq!(response.1["state"], "failed");
+    assert_eq!(response.1["steps"][0]["attempts"], 3);
+    assert_eq!(response.1["steps"][0]["state"], "failed");
+    assert_eq!(response.1["steps"][1]["state"], "cancelled");
+    test.finish().await;
+}
+
+#[tokio::test]
+async fn conflicting_fixture_evidence_stays_needs_review_after_all_roles_report() {
+    let test = TestApp::new().await;
+    let review = test.review(Uuid::new_v4()).await;
+    for seed in 61..64 {
+        let key = DeviceKey::from_bytes(&[seed; 32]);
+        let id = test.online(&key).await;
+        let assignment = test.work(&key, id, 1).await.unwrap();
+        let mut result = fixture_result();
+        if seed == 62 {
+            result.runs[0].checks[1].actual = false;
+        }
+        assert_eq!(
+            test.complete_work(&key, id, assignment.lease_id, result)
+                .await
+                .0,
+            StatusCode::OK
+        );
+    }
+    let response = test
+        .request(
+            "GET",
+            &format!("/internal/reviews/{}", review.id),
+            Value::Null,
+            Some((test.owner, false)),
+        )
+        .await;
+    assert_eq!(response.1["state"], "needs_review");
+    assert_eq!(response.1["steps"][1]["fixture_matches"], false);
+    assert!(
+        response.1["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["state"] == "completed")
     );
     test.finish().await;
 }

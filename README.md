@@ -5,7 +5,7 @@ The private Rust service that pairs devices, controls admission and assigns Patc
 
 > **DON'T TRUST! VERIFY!** Audit the implementation and test its permission boundaries. Use authorized penetration tests against your own deployment. Private source, signed results and model confidence do not establish security.
 
-**Working today:** persistent onboarding and a bounded queue for three sequential checks of an owned example. Fixture and agent evidence use separate formats. The server supports renewable agent assignments; relay and website integration follow. Customer targets and paid admission are not enabled.
+**Working today:** persistent onboarding and a bounded queue for three sequential checks of an owned example. The website can request fixture tests or isolated local-agent checks. Agent assignments renew within a fixed deadline; their reports separate tool observations from model explanations. Customer targets and paid admission are not enabled.
 
 ## Run locally
 

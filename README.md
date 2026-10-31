@@ -72,9 +72,19 @@ Creating a fixture review takes `{"request_id":"<uuid>","scenario":"access_contr
 
 ## Boundaries that matter
 
+### Website evidence collector
+
+The [collector](src/websites) captures an approved HTTPS homepage and up to four directly referenced scripts. It saves body hashes, selected security headers, inline scripts and explicit reasons for skipped content. The request/approval API follows; this library does not authorize a target by itself.
+
+Scope allows the homepage origin plus up to three exact script origins. Every DNS answer must contain only allowed public addresses; connections are pinned to that set with normal TLS verification. Redirects, proxies, credentials and compressed responses are refused. Limits are 30 seconds overall, 256 KiB for HTML, 512 KiB per external script, 2 MiB of saved HTTP bodies and 40 script references. Failed responses can consume network traffic without becoming saved evidence.
+
+This is **a limited snapshot, not a browser audit or a safety verdict**. It does not execute JavaScript, follow imports, log in or discover every request a browser would make. External hashes cover the exact response bytes; inline hashes cover parsed script text, with the original HTML retained. Integrity attributes are recorded, not certified. Use network egress filtering as a second boundary before public deployment.
+
+### Access and execution
+
 - **Core owns accounts and money.** Dispatcher cannot create credit or choose rewards. Paid admission must use saved terms and consume funding events once; that integration follows.
 - **Private access is checked on every read.** Assigned operators, service staff and approved providers can see assigned plaintext. No automatic publication of customer findings.
-- **Scope is enforced in code.** Future website work must verify authority and restrict hosts, actions, rates and time. An agent or webpage cannot expand permissions.
+- **Scope is enforced in code.** Website admission must verify authority before collection. An agent or webpage cannot expand approved hosts, actions, rates or time.
 - **Tools need a sandbox.** Source, hooks, installers and agent instructions are untrusted. Jev screening can flag problems; it cannot authorize access, remove isolation or move funds.
 - **Evidence beats votes.** Future customer findings need independent reproduction and meaningful before/after patch tests. Missing evidence stays unresolved.
 

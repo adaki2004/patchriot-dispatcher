@@ -24,6 +24,7 @@ pub struct AppState {
     pub pool: PgPool,
     internal_hash: Arc<[u8; 32]>,
     pub audience: Arc<str>,
+    agent_attempt_seconds: u64,
 }
 
 impl AppState {
@@ -41,7 +42,23 @@ impl AppState {
             pool,
             internal_hash: Arc::new(Sha256::digest(internal_key.as_bytes()).into()),
             audience: audience.into(),
+            agent_attempt_seconds: patchriot_protocol::DEFAULT_AGENT_ATTEMPT_SECONDS,
         })
+    }
+
+    pub fn with_agent_attempt_seconds(mut self, seconds: u64) -> Result<Self, &'static str> {
+        if !(patchriot_protocol::DEFAULT_AGENT_ATTEMPT_SECONDS
+            ..=patchriot_protocol::MAX_AGENT_ATTEMPT_SECONDS)
+            .contains(&seconds)
+        {
+            return Err("agent attempt limit must be 600..1800 seconds");
+        }
+        self.agent_attempt_seconds = seconds;
+        Ok(self)
+    }
+
+    fn agent_review_seconds(&self) -> u64 {
+        patchriot_protocol::agent_review_seconds(self.agent_attempt_seconds)
     }
 }
 

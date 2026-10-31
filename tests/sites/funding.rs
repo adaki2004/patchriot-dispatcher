@@ -492,3 +492,71 @@ async fn concurrent_cancellation_and_funding_never_revive_cancelled_work() {
     assert!(poll(&app, &crew[0].0, crew[0].1, 2, true).await.1["assignment"].is_null());
     app.finish().await;
 }
+
+#[tokio::test]
+async fn paid_cpu_budget_covers_retention_and_survives_configuration_changes() {
+    let mut app = TestApp::with_budget(1800).await;
+    let (site, snapshot) = saved_site(&app).await;
+    let crew = crew(&app).await;
+    let plan = app
+        .request(
+            "GET",
+            &format!("/internal/site-checks/{site}/review-plan"),
+            json!({}),
+            Some((app.owner, false)),
+        )
+        .await;
+    assert_eq!(plan.1["review_timeout_seconds"], 5700);
+    let input = admission(&snapshot, &crew);
+    sqlx::query(
+        "UPDATE site_checks SET evidence_expires_at=now()+interval '40 minutes' WHERE id=$1",
+    )
+    .bind(site)
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        app.request(
+            "POST",
+            &format!("/internal/site-checks/{site}/admit-review"),
+            input.clone(),
+            Some((app.owner, false))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    sqlx::query("UPDATE site_checks SET evidence_expires_at=now()+interval '7 days' WHERE id=$1")
+        .bind(site)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    let saved = admit(&app, site, input.clone()).await;
+    app.change_budget(600);
+    let path = format!("/internal/reviews/{}/fund", saved["id"].as_str().unwrap());
+    let receipt = funding(&input);
+    let funded = app
+        .request("POST", &path, receipt.clone(), Some((app.owner, false)))
+        .await;
+    assert_eq!(funded.0, StatusCode::OK, "{}", funded.1);
+    assert_eq!(
+        funded.1["deadline_at"].as_i64().unwrap()
+            - funded.1["payment"]["funded_at"].as_i64().unwrap(),
+        5700
+    );
+    let retry = app
+        .request("POST", &path, receipt, Some((app.owner, false)))
+        .await;
+    assert_eq!(funded, retry);
+    let work: WorkReply =
+        serde_json::from_value(poll(&app, &crew[0].0, crew[0].1, 2, true).await.1).unwrap();
+    let duration: i64 = sqlx::query_scalar(
+        "SELECT EXTRACT(EPOCH FROM deadline_at - created_at)::bigint FROM work_leases WHERE id=$1",
+    )
+    .bind(work.assignment.unwrap().lease_id)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(duration, 1800);
+    app.finish().await;
+}

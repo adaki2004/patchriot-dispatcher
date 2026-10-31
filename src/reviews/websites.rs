@@ -59,6 +59,7 @@ pub(crate) async fn plan(
     let candidates = candidates(&mut tx, None).await?;
     tx.commit().await?;
     Ok(Json(WebsiteReviewPlan {
+        review_timeout_seconds: state.agent_review_seconds(),
         site_check_id: id,
         snapshot_sha256: snapshot_hash(&snapshot)?,
         candidates,
@@ -94,7 +95,7 @@ pub(super) async fn create_review(
     scheduler(&mut tx).await?;
     sweep(&mut tx).await?;
     let existing: Option<ReviewRow> = sqlx::query_as(
-        "SELECT id, request_id, state, mode, scenario, website_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at FROM reviews WHERE requester_id = $1 AND request_id = $2",
+        "SELECT id, request_id, state, mode, scenario, website_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds FROM reviews WHERE requester_id = $1 AND request_id = $2",
     )
     .bind(caller.id)
     .bind(input.request_id)
@@ -131,7 +132,9 @@ pub(super) async fn create_review(
         Some(_) => return Err(ApiError::bad("invalid_payment_terms")),
         None => None,
     };
-    let retained_until = payment_deadline.unwrap_or_else(Utc::now) + chrono::Duration::minutes(35);
+    let review_seconds = state.agent_review_seconds();
+    let retained_until = payment_deadline.unwrap_or_else(Utc::now)
+        + chrono::Duration::seconds(review_seconds as i64);
     // Staff can inspect evidence but cannot consent to sharing on an owner's
     // behalf. Retention must cover the entire bounded review, including waiting.
     let owner: Option<Uuid> = sqlx::query_scalar("SELECT requester_id FROM site_checks WHERE id = $1 AND state = 'collected' AND snapshot IS NOT NULL AND evidence_expires_at > $2")
@@ -164,12 +167,12 @@ pub(super) async fn create_review(
         snapshot_sha256: input.snapshot_sha256,
         reviewers,
     };
-    sqlx::query("INSERT INTO reviews (id, requester_id, request_id, scenario, mode, deadline_at, site_check_id, website_context, consent_at, state, payment_terms, payment_expires_at) VALUES ($1,$2,$3,'website_snapshot_v1','website_agent',COALESCE($6::timestamptz,now() + interval '35 minutes'),$4,$5,now(),$7,$8,$9)")
+    sqlx::query("INSERT INTO reviews (id, requester_id, request_id, scenario, mode, deadline_at, site_check_id, website_context, consent_at, state, payment_terms, payment_expires_at, agent_attempt_seconds) VALUES ($1,$2,$3,'website_snapshot_v1','website_agent',COALESCE($6::timestamptz,now() + make_interval(secs => $10)),$4,$5,now(),$7,$8,$9,$11)")
         .bind(id).bind(caller.id).bind(input.request_id).bind(site_id).bind(DbJson(&context))
         .bind(payment_deadline)
         .bind(if payment.is_some() { "awaiting_payment" } else { "queued" })
         .bind(payment.as_ref().map(|(price, _)| DbJson(price)))
-        .bind(payment_deadline).execute(&mut *tx).await?;
+        .bind(payment_deadline).bind(review_seconds as f64).bind(state.agent_attempt_seconds as i32).execute(&mut *tx).await?;
     for (position, (role, device_id)) in [
         ReviewRole::Investigator,
         ReviewRole::Reproducer,

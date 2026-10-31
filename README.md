@@ -17,6 +17,7 @@ Keep `patchriot-core` beside this repository for the Apache-2.0 protocol crate. 
 | `PATCHRIOT_INTERNAL_KEY` | Generated service secret, at least 32 bytes; shared with core |
 | `PATCHRIOT_AUDIENCE` | Stable deployment identifier, e.g. `patchriot-local-v1` |
 | `PATCHRIOT_BIND` | Optional listener; default `127.0.0.1:7411` |
+| `PATCHRIOT_AGENT_ATTEMPT_SECONDS` | Optional agent limit: `600` by default, at most `1800` |
 
 ```sh
 cargo run --locked
@@ -57,9 +58,11 @@ The current scenario, `access_control_v1`, is an owned access-control bug and su
 | --- | --- | --- |
 | Active reviews, including payment reservations | 3 per account, 30 overall | Same |
 | Concurrent assignments | 1 per device and operator's declared compute group | Same |
-| Assignment lease | 60 seconds, fixed | 60 seconds, renewable up to a fixed 10-minute deadline |
+| Assignment lease | 60 seconds, fixed | 60 seconds, renewable up to the saved attempt deadline (10 minutes by default) |
 | Attempts | Up to 3 per role | Same |
-| Review lifetime, including waiting/retries | 15 minutes | 35 minutes |
+| Review lifetime, including waiting/retries | 15 minutes | Three attempt budgets + 5 minutes; 35 minutes by default |
+
+For a slow CPU pilot, `PATCHRIOT_AGENT_ATTEMPT_SECONDS=1800` permits 30 minutes per attempt and 95 minutes per review. The limit is saved at admission; changing configuration does not extend existing work or alter a paid reservation. Snapshot retention must cover payment waiting plus the full review. Operators must explicitly raise their relay limit too; their local cap can shorten an assignment.
 
 Renewal requires a signed, increasing sequence, a current assignment and fresh, unpaused presence. Duplicate renewals return the existing expiry and remaining time; they do not add time. Cancellation, expiry and revocation stop renewal. Clients must use a monotonic deadline and stop before losing the lease, including during a network outage.
 
@@ -89,9 +92,9 @@ Creating a fixture review takes `{"request_id":"<uuid>","scenario":"access_contr
 
 Core can call `admit-review` with the requester's `consent`, a server-selected `price` (`asset` and smallest-unit `amount` as strings), and `payment_expires_at` (UTC seconds, at most one hour ahead). The saved review binds that price to the exact snapshot and three selected devices. It occupies a queue slot in **awaiting_payment**; no agent receives the work or its evidence.
 
-After recording a matching settlement, core calls `fund` with `request_id`, `invoice_id` and the saved `price`. The dispatcher rechecks the agents, consent and retained snapshot, then starts the 35-minute review deadline. Repeated delivery acknowledges the same activation; one invoice cannot fund two reviews. Cancellation, expiry or removed approval prevents activation. Core retains responsibility for customer balances and refunds when work cannot start.
+After recording a matching settlement, core calls `fund` with `request_id`, `invoice_id` and the saved `price`. The dispatcher rechecks the agents, consent and retained snapshot, then starts the review deadline using its saved time budget. Repeated delivery acknowledges the same activation; one invoice cannot fund two reviews. Cancellation, expiry or removed approval prevents activation. Core retains responsibility for customer balances and refunds when work cannot start.
 
-These routes require the internal service credential and paying account. They do not accept a browser's payment claim or verify a blockchain transaction themselves. The browser's free pilot remains available; core must restrict that path when enabling paid checkout. Quote creation, funding-event delivery and refunds are separate core integration steps.
+These routes require the internal service credential and paying account. They do not accept a browser's payment claim or verify a blockchain transaction themselves. The browser's free pilot remains available; core must restrict that path when enabling paid checkout. Core implements quote preparation and funding-event delivery; browser checkout and refunds remain separate integration steps.
 
 ## Boundaries that matter
 

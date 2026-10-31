@@ -64,6 +64,7 @@ struct ReviewRow {
     funded_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     deadline_at: DateTime<Utc>,
+    agent_attempt_seconds: i32,
 }
 
 #[derive(FromRow)]
@@ -91,7 +92,7 @@ async fn views(
     caller: &Actor,
     id: Option<Uuid>,
 ) -> Result<Vec<ReviewView>, ApiError> {
-    let reviews = sqlx::query_as::<_, ReviewRow>("SELECT id, request_id, state, mode, scenario, website_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at FROM reviews WHERE (requester_id = $1 OR $2) AND ($3::uuid IS NULL OR id = $3) ORDER BY created_at DESC LIMIT 50")
+    let reviews = sqlx::query_as::<_, ReviewRow>("SELECT id, request_id, state, mode, scenario, website_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds FROM reviews WHERE (requester_id = $1 OR $2) AND ($3::uuid IS NULL OR id = $3) ORDER BY created_at DESC LIMIT 50")
         .bind(caller.id).bind(caller.admin).bind(id).fetch_all(pool).await?;
     let ids: Vec<_> = reviews.iter().map(|r| r.id).collect();
     let steps = sqlx::query_as::<_, StepRow>("SELECT s.review_id, s.role, s.state, s.attempts, l.device_id, l.operator_id, l.compute_group, CASE WHEN $2 THEN s.result ELSE NULL END AS result, s.fixture_matches, s.evidence_complete FROM review_steps s LEFT JOIN work_leases l ON l.id = s.current_lease_id WHERE s.review_id = ANY($1) ORDER BY s.position")
@@ -187,15 +188,15 @@ pub async fn create(
         ));
     }
     let id = Uuid::new_v4();
-    // Three sequential CPU roles can each take ten minutes. The overall deadline
-    // also bounds waiting and retries; renewal never moves either deadline.
-    let minutes: i32 = if input.mode == ReviewMode::OwnedAgent {
-        35
+    // Three sequential roles plus five minutes for waiting. Save this limit;
+    // later configuration changes and lease renewal cannot extend the review.
+    let seconds = if input.mode == ReviewMode::OwnedAgent {
+        state.agent_review_seconds()
     } else {
-        15
+        900
     };
-    sqlx::query("INSERT INTO reviews (id, requester_id, request_id, scenario, mode, deadline_at) VALUES ($1,$2,$3,'access_control_v1',$4,now() + make_interval(mins => $5))")
-        .bind(id).bind(caller.id).bind(input.request_id).bind(input.mode.as_str()).bind(minutes).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO reviews (id, requester_id, request_id, scenario, mode, deadline_at, agent_attempt_seconds) VALUES ($1,$2,$3,'access_control_v1',$4,now() + make_interval(secs => $5),$6)")
+        .bind(id).bind(caller.id).bind(input.request_id).bind(input.mode.as_str()).bind(seconds as f64).bind(state.agent_attempt_seconds as i32).execute(&mut *tx).await?;
     for (position, role) in [
         ReviewRole::Investigator,
         ReviewRole::Reproducer,
@@ -385,11 +386,15 @@ pub async fn poll(
             if !busy {
                 // Three distinct devices, sequential roles, and one shared-compute
                 // slot. Actual operator independence is reported, never assumed.
-                let step: Option<(Uuid, Uuid, String)> = sqlx::query_as("SELECT s.id, s.review_id, r.mode FROM review_steps s JOIN reviews r ON r.id = s.review_id WHERE s.state = 'queued' AND r.state IN ('queued','running') AND r.mode = ANY($2) AND (s.assigned_device_id IS NULL OR s.assigned_device_id = $1) AND r.deadline_at > now() AND NOT EXISTS (SELECT 1 FROM review_steps previous WHERE previous.review_id = r.id AND previous.position < s.position AND previous.state <> 'completed') AND NOT EXISTS (SELECT 1 FROM review_steps used JOIN work_leases l ON l.id = used.current_lease_id WHERE used.review_id = r.id AND used.state = 'completed' AND l.device_id = $1) ORDER BY r.created_at, s.position LIMIT 1 FOR UPDATE OF s")
+                let step: Option<(Uuid, Uuid, String, i32)> = sqlx::query_as("SELECT s.id, s.review_id, r.mode, r.agent_attempt_seconds FROM review_steps s JOIN reviews r ON r.id = s.review_id WHERE s.state = 'queued' AND r.state IN ('queued','running') AND r.mode = ANY($2) AND (s.assigned_device_id IS NULL OR s.assigned_device_id = $1) AND r.deadline_at > now() AND NOT EXISTS (SELECT 1 FROM review_steps previous WHERE previous.review_id = r.id AND previous.position < s.position AND previous.state <> 'completed') AND NOT EXISTS (SELECT 1 FROM review_steps used JOIN work_leases l ON l.id = used.current_lease_id WHERE used.review_id = r.id AND used.state = 'completed' AND l.device_id = $1) ORDER BY r.created_at, s.position LIMIT 1 FOR UPDATE OF s")
                     .bind(id).bind(&modes).fetch_optional(&mut *tx).await?;
-                if let Some((step_id, review_id, mode)) = step {
+                if let Some((step_id, review_id, mode, attempt_seconds)) = step {
                     let lease = Uuid::new_v4();
-                    let seconds: i32 = if mode != "owned_fixture" { 600 } else { 60 };
+                    let seconds = if mode != "owned_fixture" {
+                        attempt_seconds
+                    } else {
+                        60
+                    };
                     sqlx::query("INSERT INTO work_leases (id, step_id, device_id, operator_id, compute_group, expires_at, deadline_at) SELECT $1,$2,$3,$4,$5,LEAST(now() + interval '60 seconds', deadline_at),LEAST(now() + make_interval(secs => $7), deadline_at) FROM reviews WHERE id = $6")
                         .bind(lease).bind(step_id).bind(id).bind(device.operator_id).bind(&device.introduction.compute_group).bind(review_id).bind(f64::from(seconds)).execute(&mut *tx).await?;
                     sqlx::query("UPDATE review_steps SET state = 'leased', attempts = attempts + 1, current_lease_id = $1 WHERE id = $2")

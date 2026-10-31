@@ -403,6 +403,7 @@ pub async fn fleet(State(state): State<AppState>) -> Result<Json<FleetSummary>, 
     let (devices, operators, groups): (i64, i64, i64) = sqlx::query_as("SELECT count(*), count(DISTINCT operator_id), count(DISTINCT (operator_id, introduction->>'compute_group')) FROM devices WHERE approval = 'approved' AND NOT paused AND last_seen_at > now() - interval '30 seconds'")
         .fetch_one(&state.pool).await?;
     Ok(Json(FleetSummary {
+        agent_review_timeout_seconds: state.agent_review_seconds(),
         online_devices: devices,
         online_operators: operators,
         online_compute_groups: groups,

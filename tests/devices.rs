@@ -30,6 +30,10 @@ struct TestApp {
 
 impl TestApp {
     async fn new() -> Self {
+        Self::with_budget(600).await
+    }
+
+    async fn with_budget(seconds: u64) -> Self {
         let url = std::env::var("PATCHRIOT_TEST_DATABASE_URL")
             .expect("set PATCHRIOT_TEST_DATABASE_URL to a local test PostgreSQL database");
         let admin_pool = PgPoolOptions::new()
@@ -63,7 +67,10 @@ impl TestApp {
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         let internal_key = format!("fixture-service-auth-{}", Uuid::new_v4());
         let app = router(
-            AppState::new(pool.clone(), internal_key.clone(), "test-deployment".into()).unwrap(),
+            AppState::new(pool.clone(), internal_key.clone(), "test-deployment".into())
+                .unwrap()
+                .with_agent_attempt_seconds(seconds)
+                .unwrap(),
         );
         Self {
             app,
@@ -74,6 +81,19 @@ impl TestApp {
             owner: Uuid::new_v4(),
             admin: Uuid::new_v4(),
         }
+    }
+
+    fn change_budget(&mut self, seconds: u64) {
+        self.app = router(
+            AppState::new(
+                self.pool.clone(),
+                self.internal_key.clone(),
+                "test-deployment".into(),
+            )
+            .unwrap()
+            .with_agent_attempt_seconds(seconds)
+            .unwrap(),
+        );
     }
 
     async fn finish(self) {
@@ -1429,4 +1449,54 @@ async fn a_hard_deadline_ends_work_even_with_a_recent_heartbeat_and_unexpired_so
     let replacement = test.work(&key, id, 2).await.unwrap();
     assert_ne!(replacement.lease_id, work.lease_id);
     test.finish().await;
+}
+
+#[tokio::test]
+async fn configured_cpu_budget_is_saved_and_renewal_does_not_extend_it() {
+    let mut app = TestApp::with_budget(1800).await;
+    for seconds in [0, 599, 1801, u64::MAX] {
+        assert!(
+            AppState::new(
+                app.pool.clone(),
+                app.internal_key.clone(),
+                "test-deployment".into()
+            )
+            .unwrap()
+            .with_agent_attempt_seconds(seconds)
+            .is_err()
+        );
+    }
+    let fleet = app.request("GET", "/v1/fleet", json!({}), None).await;
+    assert_eq!(fleet.1["agent_review_timeout_seconds"], 5700);
+    let review = app.agent_review().await;
+    assert_eq!(review.deadline_at - review.created_at, 5700);
+    // New deployment defaults must not rewrite an admitted review's limits.
+    app.change_budget(600);
+    let key = DeviceKey::from_bytes(&[110; 32]);
+    let device = app.agent(&key, app.owner).await;
+    let work = app.work(&key, device, 1).await.unwrap();
+    let duration: i64 = sqlx::query_scalar(
+        "SELECT EXTRACT(EPOCH FROM deadline_at - created_at)::bigint FROM work_leases WHERE id=$1",
+    )
+    .bind(work.lease_id)
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(duration, 1800);
+    let first = app.renew(&key, device, work.lease_id, 1).await;
+    let second = app.renew(&key, device, work.lease_id, 2).await;
+    assert_eq!(first.0, StatusCode::OK);
+    assert_eq!(first.1["deadline_at"], second.1["deadline_at"]);
+    app.request(
+        "POST",
+        &format!("/internal/reviews/{}/cancel", review.id),
+        json!({}),
+        Some((app.owner, false)),
+    )
+    .await;
+    assert_eq!(
+        app.renew(&key, device, work.lease_id, 3).await.0,
+        StatusCode::CONFLICT
+    );
+    app.finish().await;
 }

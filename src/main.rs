@@ -14,7 +14,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = connect(&database_url)
         .await
         .map_err(|_| "database connection or migration failed")?;
-    let state = AppState::new(pool.clone(), internal_key, audience)?;
+    let seconds = std::env::var("PATCHRIOT_AGENT_ATTEMPT_SECONDS")
+        .unwrap_or_else(|_| "600".into())
+        .parse::<u64>()
+        .map_err(|_| "PATCHRIOT_AGENT_ATTEMPT_SECONDS must be an integer")?;
+    let state =
+        AppState::new(pool.clone(), internal_key, audience)?.with_agent_attempt_seconds(seconds)?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let collector = tokio::spawn(websites::run_worker(pool, stopped));

@@ -1,0 +1,43 @@
+[Unit]
+Description=Patchriot private pilot dispatcher
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=patchriot-dispatcher
+Group=patchriot-dispatcher
+WorkingDirectory=/opt/patchriot
+EnvironmentFile=/etc/patchriot/dispatcher.env
+ExecStart=/opt/patchriot/bin/patchriot-dispatcher
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=45
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=512M
+CPUQuota=200%
+TasksMax=128
+# The website collector needs outbound DNS/HTTPS. Exact-scope approval and the
+# collector's destination checks remain mandatory; this unit grants no scope.
+
+[Install]
+WantedBy=multi-user.target

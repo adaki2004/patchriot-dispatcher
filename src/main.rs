@@ -1,4 +1,4 @@
-use patchriot_dispatcher::{AppState, connect, router};
+use patchriot_dispatcher::{AppState, connect, router, websites};
 use std::net::SocketAddr;
 
 #[tokio::main]
@@ -14,13 +14,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = connect(&database_url)
         .await
         .map_err(|_| "database connection or migration failed")?;
-    let state = AppState::new(pool, internal_key, audience)?;
+    let state = AppState::new(pool.clone(), internal_key, audience)?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let collector = tokio::spawn(websites::run_worker(pool, stopped));
     eprintln!("Patchriot dispatcher listening on {bind}");
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+    let stopping = stop.clone();
+    let result = axum::serve(listener, router(state))
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            let _ = stopping.send(true);
         })
-        .await?;
+        .await;
+    let _ = stop.send(true);
+    collector.await?;
+    result?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
 }

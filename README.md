@@ -5,7 +5,7 @@ The private Rust service that pairs devices, controls admission and assigns Patc
 
 > **DON'T TRUST! VERIFY!** Audit the implementation and test its permission boundaries. Use authorized penetration tests against your own deployment. Private source, signed results and model confidence do not establish security.
 
-**Working today:** persistent onboarding and a bounded queue for three sequential checks of an owned example. The website can request fixture tests or isolated local-agent checks. Agent assignments renew within a fixed deadline; their reports separate tool observations from model explanations. Customer targets and paid admission are not enabled.
+**Working today:** persistent onboarding, three sequential checks of an owned example, and manually approved website snapshots. The example can use fixtures or isolated local agents; their reports separate tool observations from model explanations. Website collection keeps private evidence for later review. Customer agent assessments and paid admission are not enabled.
 
 ## Run locally
 
@@ -67,6 +67,8 @@ All three checks must report the expected results to complete. Agent prose alone
 | `POST /internal/pairings/claim` | Authenticated core account |
 | `GET /internal/devices`; `POST /internal/devices/:id/decision` | Account/admin through core |
 | `GET, POST /internal/reviews`; `GET /internal/reviews/:id`; `POST /internal/reviews/:id/cancel` | Requester/admin through core |
+| `GET, POST /internal/site-checks`; `GET /internal/site-checks/:id`; `POST /:id/cancel`; `GET /:id/evidence` | Requester/admin through core |
+| `POST /internal/site-checks/:id/decision` | Admin through core |
 
 Creating a fixture review takes `{"request_id":"<uuid>","scenario":"access_control_v1"}`; add `"mode":"owned_agent"` for the agent path. Account/request ID deduplicates the request; changing its mode is rejected. Cancellation takes `{}`. Renewal takes `{"lease_id":"<uuid>","sequence":1}`. Existing fixture requests, assignments and saved results remain compatible. Exact completion retries are accepted once; changed replays are rejected. See [shared types](../patchriot-core/crates/protocol/src/lib.rs) and [review handling](src/reviews.rs).
 
@@ -74,11 +76,15 @@ Creating a fixture review takes `{"request_id":"<uuid>","scenario":"access_contr
 
 ### Website evidence collector
 
-The [collector](src/websites) captures an approved HTTPS homepage and up to four directly referenced scripts. It saves body hashes, selected security headers, inline scripts and explicit reasons for skipped content. The request/approval API follows; this library does not authorize a target by itself.
+The [collector](src/websites) captures an approved HTTPS homepage and up to four directly referenced scripts. It saves body hashes, selected security headers, inline scripts and explicit reasons for skipped content. Submission records the requester's authority claim; an admin verifies permission and approves that exact immutable scope before collection. The web server runs the collection worker automatically.
 
 Scope allows the homepage origin plus up to three exact script origins. Every DNS answer must contain only allowed public addresses; connections are pinned to that set with normal TLS verification. Redirects, proxies, credentials and compressed responses are refused. Limits are 30 seconds overall, 256 KiB for HTML, 512 KiB per external script, 2 MiB of saved HTTP bodies and 40 script references. Failed responses can consume network traffic without becoming saved evidence.
 
 This is **a limited snapshot, not a browser audit or a safety verdict**. It does not execute JavaScript, follow imports, log in or discover every request a browser would make. External hashes cover the exact response bytes; inline hashes cover parsed script text, with the original HTML retained. Integrity attributes are recorded, not certified. Use network egress filtering as a second boundary before public deployment.
+
+Account/request IDs deduplicate submissions; changed scope is rejected. The pilot allows two pending/active requests and three submissions per day per account, ten overall per day, and one collection at a time across dispatcher instances. Approval expires after ten minutes. A 45-second lease recovers one interrupted attempt; retries never extend approval. Cancellation and expiry reject late results. During collection the worker checks its lease every second; already sent requests may finish.
+
+Raw evidence is readable for seven days, then removed by the worker's sweep. Downloads check both ownership and retention in the database. Scope, decisions, status and small summaries remain in history. This path does not spend funds, send evidence to agents or create a security verdict.
 
 ### Access and execution
 
@@ -88,7 +94,7 @@ This is **a limited snapshot, not a browser audit or a safety verdict**. It does
 - **Tools need a sandbox.** Source, hooks, installers and agent instructions are untrusted. Jev screening can flag problems; it cannot authorize access, remove isolation or move funds.
 - **Evidence beats votes.** Future customer findings need independent reproduction and meaningful before/after patch tests. Missing evidence stays unresolved.
 
-Google login and stronger patcher/admin authentication belong in core. Owned-site checks, customer artifacts and recurring checks follow the pilot. Recurring jobs must recheck scope, funds and capacity on every occurrence; missed runs must not create a burst.
+Google login and stronger patcher/admin authentication belong in core. Agent review of website evidence, broader customer artifacts and recurring checks follow. Recurring jobs must recheck scope, funds and capacity on every occurrence; missed runs must not create a burst.
 
 ## Verify it
 

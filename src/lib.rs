@@ -84,6 +84,20 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/internal/reviews/{id}", get(reviews::get))
         .route("/internal/reviews/{id}/cancel", post(reviews::cancel))
+        .route(
+            "/internal/site-checks",
+            get(websites::list).post(websites::create),
+        )
+        .route("/internal/site-checks/{id}", get(websites::detail))
+        .route(
+            "/internal/site-checks/{id}/decision",
+            post(websites::decide),
+        )
+        .route("/internal/site-checks/{id}/cancel", post(websites::cancel))
+        .route(
+            "/internal/site-checks/{id}/evidence",
+            get(websites::artifact),
+        )
         .route("/v1/devices/{id}/work/poll", post(reviews::poll))
         .route("/v1/devices/{id}/work/renew", post(reviews::renew))
         .route("/v1/devices/{id}/work/complete", post(reviews::complete))

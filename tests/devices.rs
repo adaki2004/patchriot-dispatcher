@@ -13,6 +13,9 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+#[path = "sites/mod.rs"]
+mod sites;
+
 struct TestApp {
     app: Router,
     pool: PgPool,

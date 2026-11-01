@@ -7,6 +7,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use patchriot_protocol::*;
 use sqlx::{FromRow, types::Json as DbJson};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 #[derive(FromRow)]
@@ -75,6 +76,7 @@ impl DeviceRow {
             state: self.state().into(),
             last_seen_at: self.last_seen_at.map(|t| t.timestamp()),
             sequence: self.sequence as u64,
+            reports_received: None,
         }
     }
 }
@@ -247,7 +249,27 @@ pub async fn list(
     .bind(caller.id)
     .fetch_all(&state.pool)
     .await?;
-    Ok(Json(rows.iter().map(DeviceRow::view).collect()))
+    let ids: Vec<_> = rows.iter().map(|row| row.id).collect();
+    // Derive counts from accepted leases, so a lost-reply retry cannot add a
+    // contribution twice. Read only the already-authorized devices' counts;
+    // never return the corresponding requesters, targets or result contents.
+    let counts: HashMap<Uuid, i64> = sqlx::query_as::<_, (Uuid, i64)>(
+        "SELECT device_id, count(*) FROM work_leases WHERE device_id = ANY($1) AND state = 'completed' AND result_hash IS NOT NULL GROUP BY device_id",
+    )
+    .bind(&ids)
+    .fetch_all(&state.pool)
+    .await?
+    .into_iter()
+    .collect();
+    Ok(Json(
+        rows.iter()
+            .map(|row| {
+                let mut view = row.view();
+                view.reports_received = Some(counts.get(&row.id).copied().unwrap_or(0) as u64);
+                view
+            })
+            .collect(),
+    ))
 }
 
 pub async fn decision(

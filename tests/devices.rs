@@ -832,6 +832,109 @@ async fn expired_attempt_is_replaced_and_its_late_result_cannot_finish_the_new_a
 }
 
 #[tokio::test]
+async fn private_report_counts_exclude_expired_work_and_count_replayed_incomplete_reports_once() {
+    let test = TestApp::new().await;
+    let key = DeviceKey::from_bytes(&[76; 32]);
+    let id = test.online(&key).await;
+    let unused = test.paired(&DeviceKey::from_bytes(&[77; 32])).await;
+    let other_owner = Uuid::new_v4();
+    let pairing = test.start(&DeviceKey::from_bytes(&[78; 32])).await;
+    let (status, other) = test.claim(&pairing.user_code, other_owner).await;
+    assert_eq!(status, StatusCode::OK);
+    let other_id = other["device_id"].clone();
+    test.review(Uuid::new_v4()).await;
+    let first = test.work(&key, id, 1).await.unwrap();
+    let (_, initial) = test
+        .request(
+            "GET",
+            "/internal/devices",
+            Value::Null,
+            Some((test.owner, false)),
+        )
+        .await;
+    assert_eq!(initial.as_array().unwrap().len(), 2);
+    assert!(
+        initial
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["reports_received"] == 0)
+    );
+
+    sqlx::query("UPDATE work_leases SET expires_at = now() - interval '1 second' WHERE id = $1")
+        .bind(first.lease_id)
+        .execute(&test.pool)
+        .await
+        .unwrap();
+    let replacement = test.work(&key, id, 2).await.unwrap();
+    assert_eq!(
+        test.complete_work(&key, id, first.lease_id, fixture_result())
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    let mut incomplete = fixture_result();
+    incomplete.runs[0].checks[1].actual = false;
+    let accepted = test
+        .complete_work(&key, id, replacement.lease_id, incomplete.clone())
+        .await;
+    assert_eq!(accepted.0, StatusCode::OK);
+    assert_eq!(accepted.1["fixture_matches"], false);
+    let replay = test
+        .complete_work(&key, id, replacement.lease_id, incomplete)
+        .await;
+    assert_eq!(replay.0, StatusCode::OK);
+    assert_eq!(replay.1["replayed"], true);
+
+    for (actor, expected_length) in [
+        (Some((test.owner, false)), 2),
+        (Some((test.admin, true)), 3),
+    ] {
+        let (status, rows) = test
+            .request("GET", "/internal/devices", Value::Null, actor)
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), expected_length);
+        assert_eq!(
+            rows.iter().find(|row| row["id"] == id.to_string()).unwrap()["reports_received"],
+            1
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|row| row["id"] == unused.to_string())
+                .unwrap()["reports_received"],
+            0
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row.get("result").is_none() && row.get("requester_id").is_none())
+        );
+    }
+    let (status, other_rows) = test
+        .request(
+            "GET",
+            "/internal/devices",
+            Value::Null,
+            Some((other_owner, false)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(other_rows.as_array().unwrap().len(), 1);
+    assert_eq!(other_rows[0]["id"], other_id);
+    assert_eq!(other_rows[0]["reports_received"], 0);
+    assert_eq!(
+        test.request("GET", "/internal/devices", Value::Null, None)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (_, public) = test.request("GET", "/v1/fleet", Value::Null, None).await;
+    assert!(public.get("reports_received").is_none());
+    test.finish().await;
+}
+
+#[tokio::test]
 async fn cancelled_or_revoked_work_cannot_submit_results_and_releases_capacity() {
     let test = TestApp::new().await;
     let review = test.review(Uuid::new_v4()).await;

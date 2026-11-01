@@ -42,6 +42,8 @@ Five-minute pairing codes are claimed once. Requests carry Ed25519 proofs bindin
 
 Approval must assess an operator and their agent's security-review, reproduction and **authorized penetration-testing capabilities** before private customer work. Pairing alone proves only control of a key.
 
+The private device list includes `reports_received`, derived from completed leases with a saved result. A repeated delivery counts once; active, cancelled and expired assignments do not count. An accepted report can still contain incomplete or conflicting evidence. Counts are activity, not verified findings or earnings. Members receive counts only for their own devices; admins can see the fleet, without request contents in the list.
+
 ## Review workflow
 
 ```mermaid

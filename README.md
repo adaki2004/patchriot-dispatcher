@@ -169,3 +169,13 @@ The PostgreSQL tests cover concurrent claims/polls, account isolation, replay, c
 Private core access in CI needs a `READ_TOKEN` Actions secret with read-only access to core. An existing `PATCHRIOT_READ_TOKEN` secret also works and takes precedence. No credential value belongs in source.
 
 This repository is private initially while admission and review policy evolve; secrecy is not a security boundary. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+## Private source uploads
+
+Core sends bounded text to `/internal/sources`: 1–12 UTF-8 files, at most 16 KiB each and 48 KiB total. Files are stored as JSON in PostgreSQL; names are never opened or extracted as paths. Intake rejects archives, binaries, hidden/unsafe paths and common credential markers. These checks do not replace removing secrets before upload.
+
+An admin approves the immutable bundle. The owner then confirms three eligible devices; each needs private-work approval and the separate signed `source_reviews: true` opt-in. The `source_agent` mode uses the existing sequential roles, capacity limits, saved deadlines and payment gate. Older polls preserve their signatures and cannot receive source work.
+
+Only a live assigned lease can read `/v1/devices/:id/work/source-evidence`. The relay uses adapter 4 to inspect source excerpts without model tools, network access or code execution. Exact quoted text and file hashes are checked on completion; matching evidence does not establish correct security reasoning. No JEV provider receives source files in this slice.
+
+Raw bundles expire after seven days. Owner deletion cancels unfinished reviews and removes raw files; metadata, decisions and reports remain. The periodic collector and queue cleanup remove expired bytes. Revocation stops further reads, renewals and results, but cannot recall data already seen. Intake caps are five retained uploads and 20 daily submissions per owner, with 200 retained globally.

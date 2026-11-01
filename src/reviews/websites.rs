@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 #[derive(FromRow)]
-struct Candidate {
+pub(super) struct Candidate {
     id: Uuid,
     operator_id: Uuid,
     operator_name: String,
@@ -17,7 +17,7 @@ struct Candidate {
 }
 
 impl Candidate {
-    fn disclosure(self) -> WebsiteReviewer {
+    pub(super) fn disclosure(self) -> WebsiteReviewer {
         WebsiteReviewer {
             device_id: self.id,
             operator_id: self.operator_id,
@@ -29,13 +29,17 @@ impl Candidate {
     }
 }
 
-async fn eligible(tx: &mut Tx<'_>, ids: Option<&[Uuid]>) -> Result<Vec<Candidate>, ApiError> {
+pub(super) async fn eligible(
+    tx: &mut Tx<'_>,
+    ids: Option<&[Uuid]>,
+    source: bool,
+) -> Result<Vec<Candidate>, ApiError> {
     // Introductions are immutable after pairing. A signed poll declares support
     // for this task, separately from staff approval and requester consent.
     // Presence-only restarts must not retain work availability forever. Busy
     // agents renew a live lease instead of polling while they execute a task.
-    let rows = sqlx::query_as::<_, Candidate>("SELECT d.id, d.operator_id, o.display_name AS operator_name, d.introduction, COALESCE(q.pending,0) AS pending_roles, EXISTS (SELECT 1 FROM work_leases busy WHERE busy.device_id = d.id AND busy.state = 'active' AND busy.expires_at > now() AND busy.deadline_at > now()) AS busy FROM devices d JOIN operators o ON o.id = d.operator_id LEFT JOIN (SELECT s.assigned_device_id, count(*) AS pending FROM review_steps s JOIN reviews r ON r.id = s.review_id WHERE r.state IN ('awaiting_payment','queued','running') AND s.state IN ('queued','leased') GROUP BY s.assigned_device_id) q ON q.assigned_device_id = d.id WHERE d.approval = 'approved' AND d.private_work_approved AND d.website_reviews AND NOT d.paused AND d.last_seen_at > now() - interval '30 seconds' AND (d.work_polled_at > now() - interval '30 seconds' OR EXISTS (SELECT 1 FROM work_leases l WHERE l.device_id = d.id AND l.state = 'active' AND l.expires_at > now() AND l.deadline_at > now())) AND d.introduction->>'runtime' = 'hermes' AND ($1::uuid[] IS NULL OR d.id = ANY($1)) ORDER BY d.created_at, d.id LIMIT 200 FOR UPDATE OF d")
-        .bind(ids).fetch_all(&mut **tx).await?;
+    let rows = sqlx::query_as::<_, Candidate>("SELECT d.id, d.operator_id, o.display_name AS operator_name, d.introduction, COALESCE(q.pending,0) AS pending_roles, EXISTS (SELECT 1 FROM work_leases busy WHERE busy.device_id = d.id AND busy.state = 'active' AND busy.expires_at > now() AND busy.deadline_at > now()) AS busy FROM devices d JOIN operators o ON o.id = d.operator_id LEFT JOIN (SELECT s.assigned_device_id, count(*) AS pending FROM review_steps s JOIN reviews r ON r.id = s.review_id WHERE r.state IN ('awaiting_payment','queued','running') AND s.state IN ('queued','leased') GROUP BY s.assigned_device_id) q ON q.assigned_device_id = d.id WHERE d.approval = 'approved' AND d.private_work_approved AND (CASE WHEN $2 THEN d.source_reviews ELSE d.website_reviews END) AND NOT d.paused AND d.last_seen_at > now() - interval '30 seconds' AND (d.work_polled_at > now() - interval '30 seconds' OR EXISTS (SELECT 1 FROM work_leases l WHERE l.device_id = d.id AND l.state = 'active' AND l.expires_at > now() AND l.deadline_at > now())) AND d.introduction->>'runtime' = 'hermes' AND ($1::uuid[] IS NULL OR d.id = ANY($1)) ORDER BY d.created_at, d.id LIMIT 200 FOR UPDATE OF d")
+        .bind(ids).bind(source).fetch_all(&mut **tx).await?;
     Ok(rows)
 }
 
@@ -43,14 +47,14 @@ pub(super) async fn candidates(
     tx: &mut Tx<'_>,
     ids: Option<&[Uuid]>,
 ) -> Result<Vec<WebsiteReviewer>, ApiError> {
-    Ok(eligible(tx, ids)
+    Ok(eligible(tx, ids, false)
         .await?
         .into_iter()
         .map(Candidate::disclosure)
         .collect())
 }
 
-fn recommend(candidates: &[Candidate], site: Uuid) -> Vec<Uuid> {
+pub(super) fn recommend(candidates: &[Candidate], site: Uuid) -> Vec<Uuid> {
     if candidates.len() < 3 {
         return Vec::new();
     }
@@ -120,7 +124,7 @@ pub(crate) async fn plan(
     scheduler(&mut tx).await?;
     sweep(&mut tx).await?;
     let snapshot = owned_snapshot(&mut tx, &caller, id).await?;
-    let candidates = eligible(&mut tx, None).await?;
+    let candidates = eligible(&mut tx, None, false).await?;
     let recommended_device_ids = recommend(&candidates, id);
     tx.commit().await?;
     Ok(Json(WebsiteReviewPlan {
@@ -161,7 +165,7 @@ pub(super) async fn create_review(
     scheduler(&mut tx).await?;
     sweep(&mut tx).await?;
     let existing: Option<ReviewRow> = sqlx::query_as(
-        "SELECT id, request_id, state, mode, scenario, website_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds FROM reviews WHERE requester_id = $1 AND request_id = $2",
+        "SELECT id, request_id, state, mode, scenario, website_context, source_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds FROM reviews WHERE requester_id = $1 AND request_id = $2",
     )
     .bind(caller.id)
     .bind(input.request_id)

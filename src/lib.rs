@@ -3,6 +3,7 @@
 mod devices;
 mod reviews;
 pub mod screening;
+mod sources;
 pub mod websites;
 
 use axum::{
@@ -134,6 +135,34 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/internal/site-checks/{id}/evidence",
             get(websites::artifact),
+        )
+        .route(
+            "/internal/sources",
+            get(sources::list)
+                .post(sources::create)
+                .layer(DefaultBodyLimit::max(
+                    patchriot_protocol::sources::MAX_SOURCE_BODY_BYTES,
+                )),
+        )
+        .route("/internal/sources/{id}", get(sources::detail))
+        .route("/internal/sources/{id}/decision", post(sources::decide))
+        .route("/internal/sources/{id}/delete", post(sources::delete))
+        .route("/internal/sources/{id}/evidence", get(sources::artifact))
+        .route(
+            "/internal/sources/{id}/review-plan",
+            get(reviews::sources::plan),
+        )
+        .route(
+            "/internal/sources/{id}/review",
+            post(reviews::sources::create),
+        )
+        .route(
+            "/internal/sources/{id}/admit-review",
+            post(reviews::sources::admit),
+        )
+        .route(
+            "/v1/devices/{id}/work/source-evidence",
+            post(reviews::sources::evidence),
         )
         .route("/v1/devices/{id}/work/poll", post(reviews::poll))
         .route("/v1/devices/{id}/work/renew", post(reviews::renew))

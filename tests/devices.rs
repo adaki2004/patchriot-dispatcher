@@ -15,6 +15,8 @@ use uuid::Uuid;
 
 #[path = "sites/mod.rs"]
 mod sites;
+#[path = "sources/mod.rs"]
+mod source_reviews;
 #[path = "sites/reviews.rs"]
 mod website_reviews;
 
@@ -297,6 +299,7 @@ impl TestApp {
                 WorkPoll {
                     sequence,
                     website_reviews: false,
+                    source_reviews: false,
                 },
             )
             .await;
@@ -841,6 +844,7 @@ async fn concurrent_polls_share_one_compute_slot_and_replays_do_not_extend_lease
             WorkPoll {
                 sequence: 1,
                 website_reviews: false,
+                source_reviews: false,
             },
         )
         .await;
@@ -1083,7 +1087,8 @@ async fn queue_capacity_unsupported_targets_and_ineligible_devices_fail_before_a
             &format!("/v1/devices/{id}/work/poll"),
             WorkPoll {
                 sequence: 1,
-                website_reviews: false
+                website_reviews: false,
+                source_reviews: false,
             }
         )
         .await
@@ -1116,7 +1121,8 @@ async fn queue_capacity_unsupported_targets_and_ineligible_devices_fail_before_a
             &format!("/v1/devices/{id}/work/poll"),
             WorkPoll {
                 sequence: 3,
-                website_reviews: false
+                website_reviews: false,
+                source_reviews: false,
             }
         )
         .await

@@ -111,6 +111,7 @@ async fn poll(
         WorkPoll {
             sequence,
             website_reviews,
+            source_reviews: false,
         },
     )
     .await

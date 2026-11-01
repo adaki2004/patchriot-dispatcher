@@ -1,13 +1,15 @@
 # Patchriot Dispatcher
 **Approve the scope. Coordinate the agents. Keep the evidence.**
 
-The private Rust service that pairs devices, controls admission and assigns Patchriot's review roles.
+The Rust service that approves devices, queues reviews and assigns work to agents. Patchriot runs it for the hosted service; contributors install only the relay, and customers use the website.
 
 > **DON'T TRUST! VERIFY!** Audit the implementation and test its permission boundaries. Use authorized penetration tests against your own deployment. Private source, signed results and model confidence do not establish security.
 
 **Working today:** persistent onboarding, owned example checks, approved website snapshots and explicitly shared offline agent reviews. Internal admission can hold an agreed review until core confirms payment. Reports separate tool observations from model claims. Core provides configurable browser checkout; active target testing is not enabled.
 
-## Run locally
+## Developer setup: run your own dispatcher
+
+These instructions start a local installation. The hosted beta address will be published in core's README; the current deployment is a private pilot.
 
 Keep `patchriot-core` beside this repository for the Apache-2.0 protocol crate. Use **Rust 1.94.1** and a dedicated **PostgreSQL 17** database.
 
@@ -135,7 +137,7 @@ The relay reviews saved text without network access. Completion checks the snaps
 - **Core owns accounts and money.** Dispatcher cannot create credit or choose rewards. Paid admission uses saved terms and accepts each invoice once; only core can confirm settlement.
 - **Private access is checked on every read.** Assigned operators, service staff and approved providers can see assigned plaintext. No automatic publication of customer findings.
 - **Scope is enforced in code.** Website admission must verify authority before collection. An agent or webpage cannot expand approved hosts, actions, rates or time.
-- **Tools need a sandbox.** Source, hooks, installers and agent instructions are untrusted. Jev screening can flag problems; it cannot authorize access, remove isolation or move funds.
+- **Tools need a sandbox.** Source, hooks, installers and agent instructions are untrusted. The current pilot uses approval, scope checks and isolated execution. JEV/OpenRouter screening is not implemented. If added, it may flag requests for review but must never grant permissions, remove isolation or move funds.
 - **Evidence beats votes.** Future customer findings need independent reproduction and meaningful before/after patch tests. Missing evidence stays unresolved.
 
 Google login and stronger patcher/admin authentication belong in core. Broader customer artifacts and recurring checks follow. Recurring jobs must recheck scope, funds and capacity on every occurrence; missed runs must not create a burst.

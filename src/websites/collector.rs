@@ -10,6 +10,7 @@ use tokio::time::{Instant, timeout, timeout_at};
 use url::Url;
 
 const MAX_HOMEPAGE_BYTES: usize = 256 * 1024;
+const MAX_HTML_MARKERS: usize = 8 * 1024;
 const MAX_SCRIPT_BYTES: usize = 512 * 1024;
 const MAX_CAPTURED_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SCRIPTS: usize = 40;
@@ -50,7 +51,7 @@ async fn snapshot(
     let started_at = crate::now();
     let homepage_url = approved_url(&scope.homepage, &scope).map_err(CollectionError)?;
     let homepage = fetcher.fetch(&homepage_url, ResourceKind::Homepage).await?;
-    let (base, candidates, script_limit_reached) = parse_scripts(&homepage.text, &homepage_url);
+    let (base, candidates, script_limit_reached) = parse_scripts(&homepage.text, &homepage_url)?;
     let mut resources = Vec::new();
     let mut scripts = Vec::new();
     let mut fetched = BTreeMap::<String, Result<String, CollectionError>>::new();
@@ -445,7 +446,23 @@ impl Candidate {
 }
 
 // Keep the HTML tree out of async state; only bounded, owned strings cross awaits.
-fn parse_scripts(html: &str, homepage: &Url) -> (Option<Url>, Vec<Candidate>, bool) {
+fn parse_scripts(
+    html: &str,
+    homepage: &Url,
+) -> Result<(Option<Url>, Vec<Candidate>, bool), CollectionError> {
+    // A small body can still contain thousands of unclosed, uniquely attributed
+    // tags that make HTML tree building expensive. Count raw '<' bytes before
+    // parsing; this deliberately includes comments and script text. Reject the
+    // whole capture rather than returning a partially parsed security snapshot.
+    if html
+        .bytes()
+        .filter(|byte| *byte == b'<')
+        .take(MAX_HTML_MARKERS + 1)
+        .count()
+        > MAX_HTML_MARKERS
+    {
+        return Err(CollectionError("html_too_complex"));
+    }
     let document = Html::parse_document(html);
     let base = document
         .select(&Selector::parse("base[href]").expect("static selector"))
@@ -486,7 +503,7 @@ fn parse_scripts(html: &str, homepage: &Url) -> (Option<Url>, Vec<Candidate>, bo
             }
         })
         .collect();
-    (base, candidates, elements.next().is_some())
+    Ok((base, candidates, elements.next().is_some()))
 }
 
 fn safe_attribute(text: &str, limit: usize) -> bool {

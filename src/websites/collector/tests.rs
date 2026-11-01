@@ -374,14 +374,61 @@ fn bounds_script_references_and_does_not_hide_a_different_base_origin() {
         "<base href='https://other.example/'><base href='https://example.com/'> {}",
         "<script src='x.js'></script>".repeat(41)
     );
-    let (base, scripts, truncated) = parse_scripts(&html, &homepage);
+    let (base, scripts, truncated) = parse_scripts(&html, &homepage).unwrap();
     assert_eq!(base.unwrap().as_str(), "https://other.example/");
     assert_eq!(scripts.len(), 40);
     assert!(truncated);
     let html = format!("<script src='{}'></script>", "é".repeat(1100));
-    let (_, scripts, _) = parse_scripts(&html, &homepage);
+    let (_, scripts, _) = parse_scripts(&html, &homepage).unwrap();
     assert!(scripts[0].invalid_attributes);
     assert!(scripts[0].src.as_ref().unwrap().len() <= MAX_URL_BYTES);
+}
+
+#[tokio::test]
+async fn dense_html_cannot_start_script_fetches_or_become_partial_evidence() {
+    let scope = normalize_scope(&WebsiteScope {
+        homepage: "https://example.com".into(),
+        script_origins: vec![],
+    })
+    .unwrap();
+    let mut html = "<script src='/app.js'></script>".to_owned();
+    // Unique formatting attributes grow html5ever's active-formatting list.
+    // This input fits the HTTP byte cap but previously spent seconds parsing.
+    for n in 0..(MAX_HTML_MARKERS * 3) {
+        html.push_str(&format!("<b a={n:x}>"));
+    }
+    assert!(html.len() < MAX_HOMEPAGE_BYTES);
+    let mut source = OwnedPages {
+        pages: BTreeMap::from([(scope.homepage.clone(), Ok(html))]),
+        fetched: vec![],
+        bytes: 0,
+    };
+    let homepage = scope.homepage.clone();
+    assert_eq!(
+        snapshot(scope, &mut source).await.unwrap_err(),
+        CollectionError("html_too_complex")
+    );
+    assert_eq!(source.fetched, [homepage]);
+}
+
+#[test]
+fn marker_limit_keeps_accepted_script_text_intact_and_rejects_dense_comments() {
+    let homepage = Url::parse("https://example.com/").unwrap();
+    let script = format!("const comparison = '{}';", "<".repeat(MAX_HTML_MARKERS - 3));
+    let html = format!("<!-- owned -->\n<script>{script}</script>");
+    let (_, scripts, truncated) = parse_scripts(&html, &homepage).unwrap();
+    assert_eq!(scripts.len(), 1);
+    assert_eq!(scripts[0].inline, script);
+    assert!(!truncated);
+
+    // The bound is intentionally conservative: '<' inside inert content also
+    // counts. Refusing such a page is a coverage limit, not a malicious verdict.
+    for extra in ["<!-- < -->", "<i>"] {
+        assert!(matches!(
+            parse_scripts(&(html.clone() + extra), &homepage),
+            Err(CollectionError("html_too_complex"))
+        ));
+    }
 }
 
 #[test]

@@ -1,5 +1,12 @@
 name: Check
-on: [push, pull_request]
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+concurrency:
+  group: check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 defaults:
@@ -7,6 +14,7 @@ defaults:
     working-directory: patchriot-dispatcher
 jobs:
   rust:
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:

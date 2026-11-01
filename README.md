@@ -140,6 +140,8 @@ Google login and stronger patcher/admin authentication belong in core. Broader c
 
 ## Verify it
 
+GitHub checks run when a ready PR targets `main` and when that PR changes. Draft PRs and ordinary branch pushes do not run checks; newer PR commits cancel superseded runs. Run the commands below locally while developing.
+
 Set `PATCHRIOT_TEST_DATABASE_URL` to a local test database whose role can create schemas.
 
 ```sh

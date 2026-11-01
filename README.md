@@ -124,9 +124,11 @@ Capture comparisons read both retained snapshots under the caller's permissions 
 
 1. An admin grants **private-work approval** to a Hermes device, with a recorded reason. Existing demo approvals do not qualify.
 2. Its signed poll explicitly declares `website_reviews: true`. Older polls retain their signature format and receive only demo work.
-3. The snapshot owner consents to three exact device IDs, ordered investigator/reproducer/challenger, and the saved snapshot SHA-256. Operator, model and compute-group declarations are recorded with consent.
+3. The dispatcher proposes three devices, ordered investigator/reproducer/challenger. The snapshot owner confirms that named team and the saved snapshot SHA-256. Operator, model and compute-group declarations are recorded with consent.
 
 Selection, admission and payment activation require a fresh work poll within 30 seconds or a current, unexpired assignment. Heartbeats alone and replayed polls do not renew work availability. A busy agent stays eligible while renewing its lease; a relay restarted in presence-only mode ages out of the selection list. After migration, idle devices need one fresh poll before selection; existing signed request formats are unchanged.
+
+The plan includes `recommended_device_ids`. Selection considers up to 200 eligible devices, preferring distinct operators, declared compute groups and models, then fewer queued roles and idle devices. Per-site tie-breaking avoids always favoring the oldest records. Planning does not reserve capacity; admission rechecks availability. Existing consent payloads and paid reservations remain valid. Deploy the dispatcher before the updated website, which requires a server proposal.
 
 Roles stay pinned to those devices. No fallback operator receives the data. Only a live assigned lease can download the original snapshot and preceding reports; cancellation, expiry and revocation stop downloads and renewals. Paused or stale devices cannot read evidence. Removing private approval fails active reviews involving that device. Data already received cannot be recalled.
 

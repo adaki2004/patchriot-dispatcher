@@ -34,7 +34,7 @@ jobs:
           repository: adaki2004/patchriot-core
           ref: c2910579bc6170a877147fd4cfa660337b205ed4
           path: patchriot-core
-          token: ${{ secrets.PATCHRIOT_READ_TOKEN || github.token }}
+          token: ${{ secrets.PATCHRIOT_READ_TOKEN || secrets.READ_TOKEN || github.token }}
           persist-credentials: false
       - run: rustup toolchain install 1.94.1 --profile minimal --component rustfmt --component clippy
       - run: cargo fmt --all --check

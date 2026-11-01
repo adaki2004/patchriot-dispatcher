@@ -320,7 +320,9 @@ async fn snapshot_honors_base_scope_deduplication_and_keeps_skipped_evidence() {
         fetched: vec![],
         bytes: 0,
     };
-    let result = snapshot(scope, &mut source).await.unwrap();
+    let result = snapshot(scope, &mut source, Instant::now() + COLLECTION_TIMEOUT)
+        .await
+        .unwrap();
     assert_eq!(source.fetched.len(), 3);
     assert_eq!(result.requests_made, 3);
     assert_eq!(result.resources.len(), 3); // One external and two inline.
@@ -405,7 +407,9 @@ async fn dense_html_cannot_start_script_fetches_or_become_partial_evidence() {
     };
     let homepage = scope.homepage.clone();
     assert_eq!(
-        snapshot(scope, &mut source).await.unwrap_err(),
+        snapshot(scope, &mut source, Instant::now() + COLLECTION_TIMEOUT)
+            .await
+            .unwrap_err(),
         CollectionError("html_too_complex")
     );
     assert_eq!(source.fetched, [homepage]);
@@ -429,6 +433,77 @@ fn marker_limit_keeps_accepted_script_text_intact_and_rejects_dense_comments() {
             Err(CollectionError("html_too_complex"))
         ));
     }
+}
+
+#[tokio::test]
+async fn parser_does_not_block_timers_or_release_capacity_when_its_caller_leaves() {
+    for cancel in [true, false] {
+        let (started, running) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let parser = tokio::spawn(run_parser(
+            Instant::now() + Duration::from_secs(30),
+            move || {
+                started.send(()).unwrap();
+                // Keep real CPU work out of this scheduling regression. A
+                // fallback prevents a failed assertion from hanging shutdown.
+                wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                Ok((None, vec![], false))
+            },
+        ));
+        timeout(Duration::from_secs(5), running)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::pause();
+        if cancel {
+            parser.abort();
+            assert!(parser.await.err().unwrap().is_cancelled());
+        } else {
+            tokio::time::advance(Duration::from_secs(31)).await;
+            assert_eq!(
+                parser.await.unwrap().err(),
+                Some(CollectionError("collection_deadline"))
+            );
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let called = calls.clone();
+        let queued = tokio::spawn(run_parser(
+            Instant::now() + Duration::from_secs(1),
+            move || {
+                called.fetch_add(1, Ordering::SeqCst);
+                Ok((None, vec![], false))
+            },
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            queued.await.unwrap().err(),
+            Some(CollectionError("collection_deadline"))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        release.send(()).unwrap();
+        tokio::time::resume();
+        assert!(
+            run_parser(Instant::now() + Duration::from_secs(5), || {
+                Ok((None, vec![], false))
+            })
+            .await
+            .is_ok()
+        );
+    }
+}
+
+#[tokio::test]
+async fn expired_parser_work_never_starts() {
+    assert_eq!(
+        run_parser(Instant::now() - Duration::from_secs(1), || {
+            panic!("expired work must not run")
+        })
+        .await
+        .err(),
+        Some(CollectionError("collection_deadline"))
+    );
 }
 
 #[test]

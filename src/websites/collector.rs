@@ -6,6 +6,7 @@ use reqwest::{Client, Response, header};
 use scraper::{Html, Selector};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, net::SocketAddr, time::Duration};
+use tokio::sync::Semaphore;
 use tokio::time::{Instant, timeout, timeout_at};
 use url::Url;
 
@@ -17,6 +18,7 @@ const MAX_SCRIPTS: usize = 40;
 const MAX_REQUESTS: u16 = 5; // Homepage plus four referenced scripts; no retries.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const COLLECTION_TIMEOUT: Duration = Duration::from_secs(30);
+static HTML_PARSER_SLOT: Semaphore = Semaphore::const_new(1);
 
 /// Stable, non-sensitive reason code. Do not expose reqwest errors: they can
 /// contain customer URLs, query strings or details of the server's network.
@@ -36,22 +38,27 @@ impl std::error::Error for CollectionError {}
 /// four directly referenced scripts, and never executes their content.
 pub async fn collect(scope: &WebsiteScope) -> Result<WebsiteSnapshot, CollectionError> {
     let scope = normalize_scope(scope).map_err(CollectionError)?;
+    let deadline = Instant::now() + COLLECTION_TIMEOUT;
     let mut fetcher = Fetcher {
-        deadline: Instant::now() + COLLECTION_TIMEOUT,
+        deadline,
         requests: 0,
         captured_bytes: 0,
     };
-    snapshot(scope, &mut fetcher).await
+    snapshot(scope, &mut fetcher, deadline).await
 }
 
 async fn snapshot(
     scope: WebsiteScope,
     fetcher: &mut impl Source,
+    deadline: Instant,
 ) -> Result<WebsiteSnapshot, CollectionError> {
     let started_at = crate::now();
     let homepage_url = approved_url(&scope.homepage, &scope).map_err(CollectionError)?;
     let homepage = fetcher.fetch(&homepage_url, ResourceKind::Homepage).await?;
-    let (base, candidates, script_limit_reached) = parse_scripts(&homepage.text, &homepage_url)?;
+    let html = homepage.text.clone();
+    let parse_url = homepage_url.clone();
+    let (base, candidates, script_limit_reached) =
+        run_parser(deadline, move || parse_scripts(&html, &parse_url)).await?;
     let mut resources = Vec::new();
     let mut scripts = Vec::new();
     let mut fetched = BTreeMap::<String, Result<String, CollectionError>>::new();
@@ -445,11 +452,37 @@ impl Candidate {
     }
 }
 
-// Keep the HTML tree out of async state; only bounded, owned strings cross awaits.
-fn parse_scripts(
-    html: &str,
-    homepage: &Url,
-) -> Result<(Option<Url>, Vec<Candidate>, bool), CollectionError> {
+type ParsedScripts = (Option<Url>, Vec<Candidate>, bool);
+
+// Parsing must not stop API requests or the collection worker's lease checks.
+// A timeout/cancellation stops waiting, but cannot interrupt a running blocking
+// task. Keep its slot inside the task until it really finishes, so cancelled
+// captures cannot accumulate CPU work. Only owned strings leave that thread.
+async fn run_parser(
+    deadline: Instant,
+    parse: impl FnOnce() -> Result<ParsedScripts, CollectionError> + Send + 'static,
+) -> Result<ParsedScripts, CollectionError> {
+    if Instant::now() >= deadline {
+        return Err(CollectionError("collection_deadline"));
+    }
+    let permit = timeout_at(deadline, HTML_PARSER_SLOT.acquire())
+        .await
+        .map_err(|_| CollectionError("collection_deadline"))?
+        .map_err(|_| CollectionError("html_parser_unavailable"))?;
+    let task = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        if Instant::now() >= deadline {
+            return Err(CollectionError("collection_deadline"));
+        }
+        parse()
+    });
+    timeout_at(deadline, task)
+        .await
+        .map_err(|_| CollectionError("collection_deadline"))?
+        .map_err(|_| CollectionError("html_parse_failed"))?
+}
+
+fn parse_scripts(html: &str, homepage: &Url) -> Result<ParsedScripts, CollectionError> {
     // A small body can still contain thousands of unclosed, uniquely attributed
     // tags that make HTML tree building expensive. Count raw '<' bytes before
     // parsing; this deliberately includes comments and script text. Reject the

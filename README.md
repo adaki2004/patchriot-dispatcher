@@ -1,13 +1,15 @@
 # Patchriot Dispatcher
 **Approve the scope. Coordinate the agents. Keep the evidence.**
 
-The private Rust service that pairs devices, controls admission and assigns Patchriot's review roles.
+The Rust service that approves devices, queues reviews and assigns work to agents. Patchriot runs it for the hosted service; contributors install only the relay, and customers use the website.
 
 > **DON'T TRUST! VERIFY!** Audit the implementation and test its permission boundaries. Use authorized penetration tests against your own deployment. Private source, signed results and model confidence do not establish security.
 
 **Working today:** persistent onboarding, owned example checks, approved website snapshots and explicitly shared offline agent reviews. Internal admission can hold an agreed review until core confirms payment. Reports separate tool observations from model claims. Core provides configurable browser checkout; active target testing is not enabled.
 
-## Run locally
+## Developer setup: run your own dispatcher
+
+These instructions start a local installation. The hosted beta address will be published in core's README; the current deployment is a private pilot.
 
 Keep `patchriot-core` beside this repository for the Apache-2.0 protocol crate. Use **Rust 1.94.1** and a dedicated **PostgreSQL 17** database.
 
@@ -106,6 +108,8 @@ The [collector](src/websites) captures an approved HTTPS homepage and up to four
 
 Scope allows the homepage origin plus up to three exact script origins. Every DNS answer must contain only allowed public addresses; connections are pinned to that set with normal TLS verification. Redirects, proxies, credentials and compressed responses are refused. Limits are 30 seconds overall, 256 KiB for HTML, 512 KiB per external script, 2 MiB of saved HTTP bodies and 40 script references. HTML with more than 8,192 raw `<` characters is refused before tree parsing, including characters inside comments and scripts. This bounds unusually dense markup; a legitimate complex page can also exceed it. No partial snapshot or security verdict is saved. Failed responses can consume network traffic without becoming saved evidence.
 
+HTML parsing runs separately from API requests and lease checks, with at most one parser per dispatcher. Cancellation or the collection deadline stops waiting for its result. A parser already running can finish in the background and retains that slot until it exits; this is a concurrency limit, not a forced CPU stop. No late result becomes a saved snapshot.
+
 This is **a limited snapshot, not a browser audit or a safety verdict**. It does not execute JavaScript, follow imports, log in or discover every request a browser would make. External hashes cover the exact response bytes; inline hashes cover parsed script text, with the original HTML retained. Integrity attributes are recorded, not certified. Use network egress filtering as a second boundary before public deployment.
 
 Account/request IDs deduplicate submissions; changed scope is rejected. The pilot allows two pending/active requests and three submissions per day per account, ten overall per day, and one collection at a time across dispatcher instances. Approval expires after ten minutes. A 45-second lease recovers one interrupted attempt; retries never extend approval. Cancellation and expiry reject late results. During collection the worker checks its lease every second; already sent requests may finish.
@@ -133,12 +137,14 @@ The relay reviews saved text without network access. Completion checks the snaps
 - **Core owns accounts and money.** Dispatcher cannot create credit or choose rewards. Paid admission uses saved terms and accepts each invoice once; only core can confirm settlement.
 - **Private access is checked on every read.** Assigned operators, service staff and approved providers can see assigned plaintext. No automatic publication of customer findings.
 - **Scope is enforced in code.** Website admission must verify authority before collection. An agent or webpage cannot expand approved hosts, actions, rates or time.
-- **Tools need a sandbox.** Source, hooks, installers and agent instructions are untrusted. Jev screening can flag problems; it cannot authorize access, remove isolation or move funds.
+- **Tools need a sandbox.** Source, hooks, installers and agent instructions are untrusted. The current pilot uses approval, scope checks and isolated execution. JEV/OpenRouter screening is not implemented. If added, it may flag requests for review but must never grant permissions, remove isolation or move funds.
 - **Evidence beats votes.** Future customer findings need independent reproduction and meaningful before/after patch tests. Missing evidence stays unresolved.
 
 Google login and stronger patcher/admin authentication belong in core. Broader customer artifacts and recurring checks follow. Recurring jobs must recheck scope, funds and capacity on every occurrence; missed runs must not create a burst.
 
 ## Verify it
+
+GitHub checks run when a ready PR targets `main` and when that PR changes. Draft PRs and ordinary branch pushes do not run checks; newer PR commits cancel superseded runs. Run the commands below locally while developing.
 
 Set `PATCHRIOT_TEST_DATABASE_URL` to a local test database whose role can create schemas.
 

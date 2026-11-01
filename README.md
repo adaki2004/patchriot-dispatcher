@@ -20,6 +20,7 @@ Keep `patchriot-core` beside this repository for the Apache-2.0 protocol crate. 
 | `PATCHRIOT_AUDIENCE` | Stable deployment identifier, e.g. `patchriot-local-v1` |
 | `PATCHRIOT_BIND` | Optional listener; default `127.0.0.1:7411` |
 | `PATCHRIOT_AGENT_ATTEMPT_SECONDS` | Optional agent limit: `600` by default, at most `1800` |
+| `PATCHRIOT_JEV_OPENROUTER_KEY` | Optional server-only OpenRouter key for consented request screening |
 
 ```sh
 cargo run --locked
@@ -139,10 +140,14 @@ The relay reviews saved text without network access. Completion checks the snaps
 
 ### Access and execution
 
+**JEV request screening:** the requester may consent to sharing their scope and permission note with TypeSafe JEV through OpenRouter. This sends no collected page, source file, credentials or account profile. Old requests stay manual-only. One background worker evaluates consented requests, with a 15-second HTTP limit, 32 KiB response limit and at most two attempts after interruption. Failed, malformed or missing-provider results are marked unavailable; they never become approvals.
+
+The [Rust client](src/screening.rs) uses OpenRouter's [decisions API](https://openrouter.ai/blog/tutorials/jev-vs-llm-when-to-use-each/), with three checks: current scope, attempted rule bypass and harmful intent. The saved result records the model, input/rubric hashes and policy version. Pilot thresholds only flag closer review; they are not calibrated odds. Admin approval waits for a requested check to finish, then still requires an independent authority check and a recorded reason. Cancellation discards late results. No result can authorize a tool or alter payment rules. Deploy dispatcher before the updated UI.
+
 - **Core owns accounts and money.** Dispatcher cannot create credit or choose rewards. Paid admission uses saved terms and accepts each invoice once; only core can confirm settlement.
 - **Private access is checked on every read.** Assigned operators, service staff and approved providers can see assigned plaintext. No automatic publication of customer findings.
 - **Scope is enforced in code.** Website admission must verify authority before collection. An agent or webpage cannot expand approved hosts, actions, rates or time.
-- **Tools need a sandbox.** Source, hooks, installers and agent instructions are untrusted. The current pilot uses approval, scope checks and isolated execution. JEV/OpenRouter screening is not implemented. If added, it may flag requests for review but must never grant permissions, remove isolation or move funds.
+- **Tools need a sandbox.** Source, hooks, installers and agent instructions are untrusted. The pilot uses approval, scope checks and isolated execution. Request screening is advisory; it cannot grant permissions, remove isolation or move funds.
 - **Evidence beats votes.** Future customer findings need independent reproduction and meaningful before/after patch tests. Missing evidence stays unresolved.
 
 Google login and stronger patcher/admin authentication belong in core. Broader customer artifacts and recurring checks follow. Recurring jobs must recheck scope, funds and capacity on every occurrence; missed runs must not create a burst.

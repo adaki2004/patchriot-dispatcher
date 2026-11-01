@@ -2,6 +2,7 @@
 
 mod devices;
 mod reviews;
+pub mod screening;
 pub mod websites;
 
 use axum::{

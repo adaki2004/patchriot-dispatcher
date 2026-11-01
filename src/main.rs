@@ -1,4 +1,4 @@
-use patchriot_dispatcher::{AppState, connect, router, websites};
+use patchriot_dispatcher::{AppState, connect, router, screening, websites};
 use std::net::SocketAddr;
 
 #[tokio::main]
@@ -20,8 +20,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| "PATCHRIOT_AGENT_ATTEMPT_SECONDS must be an integer")?;
     let state =
         AppState::new(pool.clone(), internal_key, audience)?.with_agent_attempt_seconds(seconds)?;
+    let jev = std::env::var("PATCHRIOT_JEV_OPENROUTER_KEY")
+        .ok()
+        .map(|key| screening::Jev::new(&key))
+        .transpose()?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let (stop, stopped) = tokio::sync::watch::channel(false);
+    let screening = tokio::spawn(screening::run_worker(pool.clone(), jev, stopped.clone()));
     let collector = tokio::spawn(websites::run_worker(pool, stopped));
     eprintln!("Patchriot dispatcher listening on {bind}");
     let stopping = stop.clone();
@@ -33,6 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
     let _ = stop.send(true);
     collector.await?;
+    screening.await?;
     result?;
     Ok(())
 }

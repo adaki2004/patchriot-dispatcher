@@ -326,6 +326,7 @@ mod selection_tests {
                 runtime: RuntimeKind::Hermes,
                 runtime_version: "example".into(),
                 declared_model: Some(model.into()),
+                reported_os: None,
                 compute_group: machine.into(),
                 slots: 1,
             }),

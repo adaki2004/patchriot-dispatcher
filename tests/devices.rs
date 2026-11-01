@@ -18,6 +18,65 @@ mod sites;
 #[path = "sites/reviews.rs"]
 mod website_reviews;
 
+#[tokio::test]
+async fn admitted_agent_directory_excludes_operator_details_and_unapproved_devices() {
+    let test = TestApp::new().await;
+    let key = DeviceKey::from_bytes(&[201; 32]);
+    let id = test.online(&key).await;
+    let pending_key = DeviceKey::from_bytes(&[202; 32]);
+    let pending = test.paired(&pending_key).await;
+    let caller = Some((Uuid::new_v4(), false));
+    for path in ["/internal/agents", "/internal/pairing-info"] {
+        assert_eq!(
+            test.request("GET", path, Value::Null, None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let (status, body) = test
+        .request("GET", "/internal/agents", Value::Null, caller)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let agents = body.as_array().unwrap();
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0]["id"], id.to_string());
+    assert_ne!(agents[0]["id"], pending.to_string());
+    assert_eq!(agents[0]["reported_os"], "linux");
+    assert_eq!(agents[0]["state"], "online");
+    let mut fields: Vec<_> = agents[0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort();
+    assert_eq!(
+        fields,
+        [
+            "declared_model",
+            "id",
+            "last_seen_at",
+            "reported_os",
+            "runtime",
+            "runtime_version",
+            "state"
+        ]
+    );
+    let (_, info) = test
+        .request("GET", "/internal/pairing-info", Value::Null, caller)
+        .await;
+    assert_eq!(info, json!({"audience":"test-deployment"}));
+    sqlx::query("UPDATE devices SET approval = 'revoked' WHERE id = $1")
+        .bind(id)
+        .execute(&test.pool)
+        .await
+        .unwrap();
+    let (_, after) = test
+        .request("GET", "/internal/agents", Value::Null, caller)
+        .await;
+    assert_eq!(after, json!([]));
+    test.finish().await;
+}
+
 struct TestApp {
     app: Router,
     pool: PgPool,
@@ -159,6 +218,7 @@ impl TestApp {
             runtime: RuntimeKind::OwnedFixture,
             runtime_version: "0.0.1".into(),
             declared_model: None,
+            reported_os: Some("linux".into()),
             compute_group: "shared-demo-machine".into(),
             slots: 1,
         }

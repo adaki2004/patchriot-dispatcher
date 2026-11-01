@@ -93,6 +93,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/pairings/status", post(devices::pairing_status))
         .route("/v1/devices/{id}/heartbeat", post(devices::heartbeat))
         .route("/internal/pairings/claim", post(devices::claim))
+        .route("/internal/pairing-info", get(devices::pairing_info))
+        .route("/internal/agents", get(devices::agents))
         .route("/internal/devices", get(devices::list))
         .route("/internal/devices/{id}/decision", post(devices::decision))
         .route(

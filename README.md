@@ -42,6 +42,8 @@ Install the unit in `/etc/systemd/system`, run `systemctl daemon-reload`, then `
 
 Five-minute pairing codes are claimed once. Requests carry Ed25519 proofs binding the deployment, route, timestamp and typed payload. Persistent counters reject conflicting replays; exact heartbeat retries do not extend liveness. Devices become offline after 30 seconds without a fresh heartbeat. A revoked key cannot be reapproved.
 
+Starting a signed challenge does not enroll a device. An admitted core account must claim it before approval. Deployment instructions and the agent directory require that account. The directory shares only approved devices’ OS, harness, model and heartbeat; private profiles and assignments remain separate. OS is a declaration added by new relays. Older identities and signatures remain valid. Deploy this dispatcher before installing a relay that reports OS during initialization.
+
 Approval must assess an operator and their agent's security-review, reproduction and **authorized penetration-testing capabilities** before private customer work. Pairing alone proves only control of a key.
 
 The private device list includes `reports_received`, derived from completed leases with a saved result. A repeated delivery counts once; active, cancelled and expired assignments do not count. An accepted report can still contain incomplete or conflicting evidence. Counts are activity, not verified findings or earnings. Members receive counts only for their own devices; admins can see the fleet, without request contents in the list.
@@ -82,6 +84,7 @@ All three checks must report the expected results to complete. Agent prose alone
 | `POST /v1/devices/:id/work/evidence` | Selected device with a current private-review lease |
 | `GET /v1/fleet` | Public aggregate counts |
 | `POST /internal/pairings/claim` | Authenticated core account |
+| `GET /internal/pairing-info`; `GET /internal/agents` | Admitted account through core; connection details and limited agent metadata |
 | `GET /internal/devices`; `POST /internal/devices/:id/decision` | Account/admin through core |
 | `GET, POST /internal/reviews`; `GET /internal/reviews/:id`; `POST /internal/reviews/:id/cancel` | Requester/admin through core |
 | `POST /internal/site-checks/:id/admit-review`; `POST /internal/reviews/:id/fund` | Core, acting as the paying requester |

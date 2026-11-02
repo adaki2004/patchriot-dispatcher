@@ -246,3 +246,17 @@ docker build -t patchriot-dispatcher:local ../dispatcher-build
 The helper copies Rust source and manifests, excludes environment/key files and refuses to overwrite an existing directory. Run `railway up ../dispatcher-build` for the selected private dispatcher service once its runtime variables are configured. Keep that build directory private and outside Git. Set `DATABASE_URL`, `PATCHRIOT_INTERNAL_KEY` and `PATCHRIOT_AUDIENCE`; optional screening uses `PATCHRIOT_JEV_OPENROUTER_KEY`. The image listens on port `7411` and runs as an unprivileged user.
 
 **Do not attach a public domain or TCP proxy to this service.** Core reaches it through Railway's private network. Remote agents still require the separately configured private relay gateway; an internal Railway URL is not reachable from their VPS. Preserve the Tailscale gateway boundary described above. This image alone does not establish a tailnet or connect agents.
+
+### Separate hosted agent gateway
+
+For separate Railway services, run the companion **mesh image** beside the main dispatcher. It shares the dispatcher database and audience, uses the same signed device handlers, and has no internal service key or admin routes. Only the main dispatcher runs DNS verification, screening and collection workers. Existing same-host Tailscale setups can continue using the two-listener configuration above.
+
+```sh
+docker build --build-arg PATCHRIOT_IMAGE=mesh -t patchriot-gateway:local ../dispatcher-build
+```
+
+On Railway, select this image with the build variable `PATCHRIOT_IMAGE=mesh`. Set `DATABASE_URL` to the dispatcher's private database and use the same `PATCHRIOT_AUDIENCE` and `PATCHRIOT_AGENT_ATTEMPT_SECONDS`. Set `TS_AUTHKEY` to a private, tagged Tailscale key approved for `tag:patchriot-dispatcher`; enable tailnet HTTPS and apply the grants above. Do not give this service core's internal key, model credentials or treasury keys.
+
+Mount a dedicated persistent volume at `/var/lib/tailscale`, owned by UID/GID `65534:65534` with mode `0700`. Provision that ownership before starting; the image deliberately refuses root execution and cannot repair a root-owned volume. Keep machine state across releases so the tailnet address stays stable. `/tmp` must be writable for the local socket. The image pins Tailscale 1.104.4 and uses userspace networking, without `/dev/net/tun`, privileged mode or network capabilities.
+
+The gateway listens only on `127.0.0.1:7412`; `deploy/serve.json` shares it over private Tailscale HTTPS on port 443 with Funnel disabled. No public Railway domain or TCP proxy belongs on this service. The launcher stops both processes if either exits, and its container health check requires both local services. Set core's `PATCHRIOT_RELAY_ORIGIN` to the resulting tailnet HTTPS address, then run the relay's `mesh-check` from each admitted agent host before pairing. Network admission still does not approve a device or grant access to customer work.

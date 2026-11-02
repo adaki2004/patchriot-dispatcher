@@ -25,7 +25,7 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
-    internal_hash: Arc<[u8; 32]>,
+    internal_hash: Option<Arc<[u8; 32]>>,
     pub audience: Arc<str>,
     agent_attempt_seconds: u64,
 }
@@ -38,12 +38,20 @@ impl AppState {
         {
             return Err("internal key must be 32..256 non-whitespace bytes");
         }
+        let mut state = Self::relay_only(pool, audience)?;
+        state.internal_hash = Some(Arc::new(Sha256::digest(internal_key.as_bytes()).into()));
+        Ok(state)
+    }
+
+    /// Signed device routes need no core service key. Even if this state is
+    /// accidentally passed to the full router, it cannot authorize internal calls.
+    pub fn relay_only(pool: PgPool, audience: String) -> Result<Self, &'static str> {
         if audience.is_empty() || audience.len() > 200 || audience.chars().any(char::is_control) {
             return Err("invalid deployment audience");
         }
         Ok(Self {
             pool,
-            internal_hash: Arc::new(Sha256::digest(internal_key.as_bytes()).into()),
+            internal_hash: None,
             audience: audience.into(),
             agent_attempt_seconds: patchriot_protocol::DEFAULT_AGENT_ATTEMPT_SECONDS,
         })
@@ -285,13 +293,17 @@ pub(crate) struct Actor {
 /// These headers may only be constructed by core after authenticating its session.
 /// A browser forwarding the same headers without the separate service key is denied.
 fn actor(headers: &HeaderMap, state: &AppState) -> Result<Actor, ApiError> {
+    let expected = state
+        .internal_hash
+        .as_deref()
+        .ok_or_else(ApiError::denied)?;
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or_else(ApiError::denied)?;
     let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    if !bool::from(state.internal_hash.as_ref().ct_eq(&hash)) {
+    if !bool::from(expected.ct_eq(&hash)) {
         return Err(ApiError::denied());
     }
     let id = headers

@@ -56,6 +56,8 @@ struct SiteRow {
     summary: Option<DbJson<WebsiteSummary>>,
     evidence_available: bool,
     evidence_expires_at: Option<DateTime<Utc>>,
+    screening_state: String,
+    screening: Option<DbJson<RequestScreening>>,
 }
 
 async fn views(
@@ -63,7 +65,7 @@ async fn views(
     caller: &Actor,
     id: Option<Uuid>,
 ) -> Result<Vec<SiteCheckView>, ApiError> {
-    let rows = sqlx::query_as::<_, SiteRow>("SELECT id, request_id, requester_id, scope, scope_sha256, authority_note, state, created_at, deadline_at, decided_by, decision_note, attempts, error, summary, (snapshot IS NOT NULL AND evidence_expires_at > now()) AS evidence_available, evidence_expires_at FROM site_checks WHERE (requester_id = $1 OR $2) AND ($3::uuid IS NULL OR id = $3) ORDER BY created_at DESC LIMIT 20")
+    let rows = sqlx::query_as::<_, SiteRow>("SELECT id, request_id, requester_id, scope, scope_sha256, authority_note, state, created_at, deadline_at, decided_by, decision_note, attempts, error, summary, (snapshot IS NOT NULL AND evidence_expires_at > now()) AS evidence_available, evidence_expires_at, screening_state, screening FROM site_checks WHERE (requester_id = $1 OR $2) AND ($3::uuid IS NULL OR id = $3) ORDER BY created_at DESC LIMIT 20")
         .bind(caller.id).bind(caller.admin).bind(id).fetch_all(pool).await?;
     Ok(rows
         .into_iter()
@@ -84,6 +86,8 @@ async fn views(
             summary: r.summary.map(|s| s.0),
             evidence_available: r.evidence_available,
             evidence_expires_at: r.evidence_expires_at.map(|d| d.timestamp()),
+            screening_state: r.screening_state,
+            screening: r.screening.map(|s| s.0),
         })
         .collect())
 }
@@ -136,10 +140,10 @@ pub(crate) async fn create(
     let mut tx = state.pool.begin().await?;
     lock(&mut tx).await?;
     sweep(&mut tx).await?;
-    let existing: Option<(Uuid, String, String)> = sqlx::query_as("SELECT id, scope_sha256, authority_note FROM site_checks WHERE requester_id = $1 AND request_id = $2")
+    let existing: Option<(Uuid, String, String, bool)> = sqlx::query_as("SELECT id, scope_sha256, authority_note, screening_state != 'not_requested' FROM site_checks WHERE requester_id = $1 AND request_id = $2")
         .bind(caller.id).bind(input.request_id).fetch_optional(&mut *tx).await?;
-    if let Some((id, existing_hash, existing_note)) = existing {
-        if hash != existing_hash || note != existing_note {
+    if let Some((id, existing_hash, existing_note, screened)) = existing {
+        if hash != existing_hash || note != existing_note || screened != input.accepts_screening {
             return Err(ApiError::conflict("conflicting_site_request"));
         }
         tx.commit().await?;
@@ -154,8 +158,9 @@ pub(crate) async fn create(
         ));
     }
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO site_checks (id,requester_id,request_id,scope,scope_sha256,authority_note) VALUES ($1,$2,$3,$4,$5,$6)")
-        .bind(id).bind(caller.id).bind(input.request_id).bind(DbJson(scope)).bind(hash).bind(note).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO site_checks (id,requester_id,request_id,scope,scope_sha256,authority_note,screening_state) VALUES ($1,$2,$3,$4,$5,$6,$7)")
+        .bind(id).bind(caller.id).bind(input.request_id).bind(DbJson(scope)).bind(hash).bind(note)
+        .bind(if input.accepts_screening { "queued" } else { "not_requested" }).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(Json(view(&state.pool, &caller, id).await?))
 }
@@ -185,7 +190,7 @@ pub(crate) async fn decide(
     let mut tx = state.pool.begin().await?;
     lock(&mut tx).await?;
     sweep(&mut tx).await?;
-    let (status, hash, decision, reason): (String, String, Option<String>, Option<String>) = sqlx::query_as("SELECT state, scope_sha256, decision_action, decision_note FROM site_checks WHERE id = $1 FOR UPDATE")
+    let (status, hash, decision, reason, screening): (String, String, Option<String>, Option<String>, String) = sqlx::query_as("SELECT state, scope_sha256, decision_action, decision_note, screening_state FROM site_checks WHERE id = $1 FOR UPDATE")
         .bind(id).fetch_optional(&mut *tx).await?.ok_or_else(ApiError::missing)?;
     if hash != input.scope_sha256 {
         return Err(ApiError::conflict("scope_changed"));
@@ -197,6 +202,11 @@ pub(crate) async fn decide(
     } else {
         if status != "pending_approval" {
             return Err(ApiError::conflict("site_check_not_pending"));
+        }
+        if input.action == SiteDecision::Approve
+            && matches!(screening.as_str(), "queued" | "running")
+        {
+            return Err(ApiError::conflict("request_screening_pending"));
         }
         sqlx::query("UPDATE site_checks SET state = $2, decided_by = $3, decision_note = $4, decision_action = $5, decided_at = now(), deadline_at = CASE WHEN $5 = 'approve' THEN now() + interval '10 minutes' ELSE deadline_at END WHERE id = $1")
             .bind(id).bind(if input.action == SiteDecision::Approve { "queued" } else { "rejected" }).bind(caller.id).bind(note).bind(action).execute(&mut *tx).await?;

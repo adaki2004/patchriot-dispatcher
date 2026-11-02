@@ -7,6 +7,79 @@ mod availability;
 #[path = "funding.rs"]
 mod funding;
 
+#[tokio::test]
+async fn dispatcher_proposes_a_diverse_team_and_new_plans_do_not_reassign_saved_work() {
+    let app = TestApp::new().await;
+    let (site, snapshot) = saved_site(&app).await;
+    let _original = crew(&app).await;
+    for seed in [81, 82] {
+        let key = DeviceKey::from_bytes(&[seed; 32]);
+        let id = app.agent(&key, Uuid::new_v4()).await;
+        approve_private(&app, id).await;
+        assert_eq!(poll(&app, &key, id, 1, true).await.0, StatusCode::OK);
+    }
+    let plan_path = format!("/internal/site-checks/{site}/review-plan");
+    let first = app
+        .request("GET", &plan_path, json!({}), Some((app.owner, false)))
+        .await;
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    let plan: WebsiteReviewPlan = serde_json::from_value(first.1).unwrap();
+    assert_eq!(plan.recommended_device_ids.len(), 3);
+    let operators: std::collections::HashSet<_> = plan
+        .recommended_device_ids
+        .iter()
+        .map(|id| {
+            plan.candidates
+                .iter()
+                .find(|c| c.device_id == *id)
+                .unwrap()
+                .operator_id
+        })
+        .collect();
+    assert_eq!(operators.len(), 3);
+    let input = json!({"request_id":Uuid::new_v4(),"snapshot_sha256":snapshot_hash(&snapshot).unwrap(),"device_ids":plan.recommended_device_ids,"accepts_operator_access":true});
+    let started = app
+        .request(
+            "POST",
+            &format!("/internal/site-checks/{site}/review"),
+            input.clone(),
+            Some((app.owner, false)),
+        )
+        .await;
+    assert_eq!(started.0, StatusCode::OK, "{}", started.1);
+    let second = app
+        .request("GET", &plan_path, json!({}), Some((app.owner, false)))
+        .await;
+    assert_eq!(second.0, StatusCode::OK, "{}", second.1);
+    assert_ne!(
+        second.1["recommended_device_ids"], input["device_ids"],
+        "new requests can use a less occupied device of the same operator"
+    );
+    let repeat = app
+        .request(
+            "POST",
+            &format!("/internal/site-checks/{site}/review"),
+            input.clone(),
+            Some((app.owner, false)),
+        )
+        .await;
+    assert_eq!(repeat.0, StatusCode::OK);
+    assert_eq!(repeat.1["id"], started.1["id"]);
+    assert_eq!(
+        repeat.1["website"]["reviewers"],
+        started.1["website"]["reviewers"]
+    );
+    let leases: i64 = sqlx::query_scalar("SELECT count(*) FROM work_leases")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        leases, 0,
+        "planning and consent do not fabricate agent progress"
+    );
+    app.finish().await;
+}
+
 async fn saved_site(app: &TestApp) -> (Uuid, WebsiteSnapshot) {
     let input = json!({"request_id":Uuid::new_v4(),"scope":{"homepage":"https://example.com/","script_origins":[]},"authorized":true,"authority_note":"I operate this owned fixture website."});
     let response = app
@@ -38,6 +111,8 @@ async fn poll(
         WorkPoll {
             sequence,
             website_reviews,
+            source_reviews: false,
+            live_tests: false,
         },
     )
     .await

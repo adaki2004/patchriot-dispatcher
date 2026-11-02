@@ -18,6 +18,7 @@ pub(super) async fn claim(pool: &PgPool) -> Result<Option<CollectionLease>, sqlx
     let mut tx = pool.begin().await?;
     store::lock(&mut tx).await?;
     store::sweep(&mut tx).await?;
+    crate::sources::sweep(&mut tx).await?;
     let busy: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM site_checks WHERE state = 'collecting')")
             .fetch_one(&mut *tx)

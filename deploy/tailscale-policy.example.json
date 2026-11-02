@@ -1,0 +1,20 @@
+{
+  "tagOwners": {
+    "tag:patchriot-dispatcher": ["autogroup:admin"],
+    "tag:patchriot-agent": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["tag:patchriot-agent"],
+      "dst": ["tag:patchriot-dispatcher"],
+      "ip": ["tcp:443"]
+    }
+  ],
+  "tests": [
+    {
+      "src": "tag:patchriot-agent",
+      "accept": ["tag:patchriot-dispatcher:443"],
+      "deny": ["tag:patchriot-dispatcher:7411", "tag:patchriot-dispatcher:7412", "tag:patchriot-agent:22"]
+    }
+  ]
+}

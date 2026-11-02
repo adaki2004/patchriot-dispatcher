@@ -21,6 +21,67 @@ async fn create(app: &TestApp, input: Value) -> Value {
 }
 
 #[tokio::test]
+async fn screening_requires_consent_and_never_replaces_admin_permission() {
+    let app = TestApp::new().await;
+    let mut input = request();
+    let old = create(&app, input.clone()).await;
+    assert_eq!(old["screening_state"], "not_requested");
+    assert_eq!(old["screening"], Value::Null);
+    input["accepts_screening"] = json!(true);
+    assert_eq!(
+        app.request(
+            "POST",
+            "/internal/site-checks",
+            input.clone(),
+            Some((app.owner, false))
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    input["request_id"] = json!(Uuid::new_v4());
+    let screened = create(&app, input.clone()).await;
+    assert_eq!(screened["screening_state"], "queued");
+    assert_eq!(create(&app, input).await["id"], screened["id"]);
+    let id: Uuid = serde_json::from_value(screened["id"].clone()).unwrap();
+    let path = format!("/internal/site-checks/{id}/decision");
+    let decision = json!({"action":"approve","scope_sha256":screened["scope_sha256"],"reason":"Reviewed exact scope and verified permission independently."});
+    let pending = app
+        .request("POST", &path, decision.clone(), Some((app.admin, true)))
+        .await;
+    assert_eq!(pending.0, StatusCode::CONFLICT);
+    assert_eq!(pending.1["error"], "request_screening_pending");
+    sqlx::query("UPDATE site_checks SET screening_state = 'unavailable' WHERE id = $1")
+        .bind(id)
+        .execute(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.request("POST", &path, decision.clone(), Some((app.owner, false)))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let hidden = app
+        .request(
+            "GET",
+            &format!("/internal/site-checks/{id}"),
+            json!({}),
+            Some((Uuid::new_v4(), false)),
+        )
+        .await;
+    assert_eq!(hidden.0, StatusCode::NOT_FOUND);
+    let approved = app
+        .request("POST", &path, decision, Some((app.admin, true)))
+        .await;
+    assert_eq!(approved.0, StatusCode::OK);
+    assert_eq!(approved.1["state"], "queued");
+    assert_eq!(approved.1["screening_state"], "unavailable");
+    assert_eq!(approved.1["attempts"], 0);
+    app.finish().await;
+}
+
+#[tokio::test]
 async fn scope_requires_authority_and_separate_admin_approval() {
     let app = TestApp::new().await;
     let input = request();

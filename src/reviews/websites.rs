@@ -3,18 +3,21 @@
 
 use super::*;
 use patchriot_protocol::{website_reviews::*, websites::WebsiteSnapshot};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 #[derive(FromRow)]
-struct Candidate {
+pub(super) struct Candidate {
     id: Uuid,
     operator_id: Uuid,
     operator_name: String,
     introduction: DbJson<DeviceIntroduction>,
+    pending_roles: i64,
+    busy: bool,
 }
 
 impl Candidate {
-    fn disclosure(self) -> WebsiteReviewer {
+    pub(super) fn disclosure(self) -> WebsiteReviewer {
         WebsiteReviewer {
             device_id: self.id,
             operator_id: self.operator_id,
@@ -26,17 +29,79 @@ impl Candidate {
     }
 }
 
-pub(super) async fn candidates(
+pub(super) async fn eligible(
     tx: &mut Tx<'_>,
     ids: Option<&[Uuid]>,
-) -> Result<Vec<WebsiteReviewer>, ApiError> {
+    mode: ReviewMode,
+) -> Result<Vec<Candidate>, ApiError> {
     // Introductions are immutable after pairing. A signed poll declares support
     // for this task, separately from staff approval and requester consent.
     // Presence-only restarts must not retain work availability forever. Busy
     // agents renew a live lease instead of polling while they execute a task.
-    let rows = sqlx::query_as::<_, Candidate>("SELECT d.id, d.operator_id, o.display_name AS operator_name, d.introduction FROM devices d JOIN operators o ON o.id = d.operator_id WHERE d.approval = 'approved' AND d.private_work_approved AND d.website_reviews AND NOT d.paused AND d.last_seen_at > now() - interval '30 seconds' AND (d.work_polled_at > now() - interval '30 seconds' OR EXISTS (SELECT 1 FROM work_leases l WHERE l.device_id = d.id AND l.state = 'active' AND l.expires_at > now() AND l.deadline_at > now())) AND d.introduction->>'runtime' = 'hermes' AND ($1::uuid[] IS NULL OR d.id = ANY($1)) ORDER BY d.created_at, d.id LIMIT 30 FOR UPDATE OF d")
-        .bind(ids).fetch_all(&mut **tx).await?;
-    Ok(rows.into_iter().map(Candidate::disclosure).collect())
+    let rows = sqlx::query_as::<_, Candidate>("SELECT d.id, d.operator_id, o.display_name AS operator_name, d.introduction, COALESCE(q.pending,0) AS pending_roles, EXISTS (SELECT 1 FROM work_leases busy WHERE busy.device_id = d.id AND busy.state = 'active' AND busy.expires_at > now() AND busy.deadline_at > now()) AS busy FROM devices d JOIN operators o ON o.id = d.operator_id LEFT JOIN (SELECT s.assigned_device_id, count(*) AS pending FROM review_steps s JOIN reviews r ON r.id = s.review_id WHERE r.state IN ('awaiting_payment','queued','running') AND s.state IN ('queued','leased') GROUP BY s.assigned_device_id) q ON q.assigned_device_id = d.id WHERE d.approval = 'approved' AND d.private_work_approved AND (CASE $2 WHEN 'source_agent' THEN d.source_reviews WHEN 'pentest_agent' THEN d.live_tests ELSE d.website_reviews END) AND NOT d.paused AND d.last_seen_at > now() - interval '30 seconds' AND (d.work_polled_at > now() - interval '30 seconds' OR EXISTS (SELECT 1 FROM work_leases l WHERE l.device_id = d.id AND l.state = 'active' AND l.expires_at > now() AND l.deadline_at > now())) AND d.introduction->>'runtime' = 'hermes' AND ($2 <> 'pentest_agent' OR d.introduction->>'declared_model' = 'abliterated-model-large-v2') AND ($1::uuid[] IS NULL OR d.id = ANY($1)) ORDER BY d.created_at, d.id LIMIT 200 FOR UPDATE OF d")
+        .bind(ids).bind(mode.as_str()).fetch_all(&mut **tx).await?;
+    Ok(rows)
+}
+
+pub(super) async fn candidates(
+    tx: &mut Tx<'_>,
+    ids: Option<&[Uuid]>,
+) -> Result<Vec<WebsiteReviewer>, ApiError> {
+    Ok(eligible(tx, ids, ReviewMode::WebsiteAgent)
+        .await?
+        .into_iter()
+        .map(Candidate::disclosure)
+        .collect())
+}
+
+pub(super) fn recommend(candidates: &[Candidate], site: Uuid) -> Vec<Uuid> {
+    if candidates.len() < 3 {
+        return Vec::new();
+    }
+    let mut chosen: Vec<&Candidate> = Vec::new();
+    // Prefer different operators, declared machines and models, then lighter
+    // queues. The per-site hash breaks ties without always picking the oldest
+    // devices. Declarations are useful routing hints, not proof of independence.
+    for _ in 0..3 {
+        let next = candidates
+            .iter()
+            .filter(|candidate| !chosen.iter().any(|selected| selected.id == candidate.id))
+            .min_by_key(|candidate| {
+                let intro = &candidate.introduction;
+                let model = intro.declared_model.as_deref().unwrap_or("").to_lowercase();
+                let same_operator = chosen
+                    .iter()
+                    .any(|other| other.operator_id == candidate.operator_id);
+                let same_group = chosen.iter().any(|other| {
+                    other.operator_id == candidate.operator_id
+                        && other.introduction.compute_group == intro.compute_group
+                });
+                let same_model = model.is_empty()
+                    || chosen.iter().any(|other| {
+                        other
+                            .introduction
+                            .declared_model
+                            .as_deref()
+                            .unwrap_or("")
+                            .to_lowercase()
+                            == model
+                    });
+                let mut tie = Sha256::new();
+                tie.update(site.as_bytes());
+                tie.update(candidate.id.as_bytes());
+                (
+                    same_operator,
+                    same_group,
+                    same_model,
+                    candidate.pending_roles,
+                    candidate.busy,
+                    <[u8; 32]>::from(tie.finalize()),
+                )
+            })
+            .expect("at least three distinct database devices");
+        chosen.push(next);
+    }
+    chosen.into_iter().map(|candidate| candidate.id).collect()
 }
 
 async fn owned_snapshot(
@@ -57,14 +122,17 @@ pub(crate) async fn plan(
     let caller = actor(&headers, &state)?;
     let mut tx = state.pool.begin().await?;
     scheduler(&mut tx).await?;
+    sweep(&mut tx).await?;
     let snapshot = owned_snapshot(&mut tx, &caller, id).await?;
-    let candidates = candidates(&mut tx, None).await?;
+    let candidates = eligible(&mut tx, None, ReviewMode::WebsiteAgent).await?;
+    let recommended_device_ids = recommend(&candidates, id);
     tx.commit().await?;
     Ok(Json(WebsiteReviewPlan {
         review_timeout_seconds: state.agent_review_seconds(),
         site_check_id: id,
         snapshot_sha256: snapshot_hash(&snapshot)?,
-        candidates,
+        candidates: candidates.into_iter().map(Candidate::disclosure).collect(),
+        recommended_device_ids,
     }))
 }
 
@@ -97,7 +165,7 @@ pub(super) async fn create_review(
     scheduler(&mut tx).await?;
     sweep(&mut tx).await?;
     let existing: Option<ReviewRow> = sqlx::query_as(
-        "SELECT id, request_id, state, mode, scenario, website_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds FROM reviews WHERE requester_id = $1 AND request_id = $2",
+        "SELECT id, request_id, state, mode, scenario, website_context, source_context, pentest_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds FROM reviews WHERE requester_id = $1 AND request_id = $2",
     )
     .bind(caller.id)
     .bind(input.request_id)
@@ -246,4 +314,99 @@ pub(crate) async fn evidence(
         snapshot,
         previous_reports,
     }))
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    fn candidate(id: u128, operator: u128, machine: &str, model: &str, pending: i64) -> Candidate {
+        Candidate {
+            id: Uuid::from_u128(id),
+            operator_id: Uuid::from_u128(operator),
+            operator_name: "Example operator".into(),
+            introduction: DbJson(DeviceIntroduction {
+                label: "Example agent".into(),
+                runtime: RuntimeKind::Hermes,
+                runtime_version: "example".into(),
+                declared_model: Some(model.into()),
+                reported_os: None,
+                compute_group: machine.into(),
+                slots: 1,
+            }),
+            pending_roles: pending,
+            busy: false,
+        }
+    }
+
+    #[test]
+    fn three_roles_prefer_distinct_operators_and_keep_shared_infrastructure_visible() {
+        let pool = vec![
+            candidate(1, 10, "host-a", "model-a", 0),
+            candidate(2, 10, "host-a", "model-a", 0),
+            candidate(3, 20, "host-b", "model-b", 2),
+            candidate(4, 30, "host-c", "model-c", 3),
+        ];
+        let selection = recommend(&pool, Uuid::from_u128(50));
+        assert_eq!(selection.len(), 3);
+        let operators: HashSet<_> = selection
+            .iter()
+            .map(|id| pool.iter().find(|c| c.id == *id).unwrap().operator_id)
+            .collect();
+        assert_eq!(operators.len(), 3);
+        assert!(recommend(&pool[..2], Uuid::nil()).is_empty());
+        let shared = vec![
+            candidate(1, 10, "same-host", "a", 0),
+            candidate(2, 10, "same-host", "b", 0),
+            candidate(3, 10, "same-host", "c", 0),
+        ];
+        assert_eq!(
+            recommend(&shared, Uuid::nil()).len(),
+            3,
+            "a disclosed one-host pilot still works"
+        );
+    }
+
+    #[test]
+    fn lighter_queues_win_and_ties_are_stable_for_a_site_without_fixed_global_favorites() {
+        let pool = vec![
+            candidate(1, 10, "same", "a", 8),
+            candidate(2, 10, "same", "a", 0),
+            candidate(3, 10, "same", "a", 0),
+            candidate(4, 10, "same", "a", 0),
+        ];
+        let first = recommend(&pool, Uuid::from_u128(50));
+        assert!(!first.contains(&pool[0].id));
+        assert_eq!(first, recommend(&pool, Uuid::from_u128(50)));
+        let orders: HashSet<_> = (0..12)
+            .map(|site| recommend(&pool, Uuid::from_u128(site)))
+            .collect();
+        assert!(
+            orders.len() > 1,
+            "different sites should not always get the same first role"
+        );
+    }
+
+    #[test]
+    fn declared_models_and_machines_are_preferences_not_attestations() {
+        let pool = vec![
+            candidate(1, 10, "host-a", "model-a", 0),
+            candidate(2, 10, "host-a", "model-a", 0),
+            candidate(3, 10, "host-b", "model-b", 0),
+            candidate(4, 10, "host-c", "model-c", 0),
+        ];
+        let selection = recommend(&pool, Uuid::nil());
+        let models: HashSet<_> = selection
+            .iter()
+            .map(|id| {
+                pool.iter()
+                    .find(|c| c.id == *id)
+                    .unwrap()
+                    .introduction
+                    .declared_model
+                    .clone()
+            })
+            .collect();
+        assert_eq!(models.len(), 3);
+    }
 }

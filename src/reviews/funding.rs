@@ -40,7 +40,7 @@ pub(crate) async fn fund(
     sweep(&mut tx).await?;
     // Even staff must act as the paying account. Payment never grants consent
     // on another requester's behalf.
-    let current: ReviewRow = sqlx::query_as("SELECT id, request_id, state, mode, scenario, website_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds FROM reviews WHERE id = $1 AND requester_id = $2 FOR UPDATE")
+    let current: ReviewRow = sqlx::query_as("SELECT id, request_id, state, mode, scenario, website_context, source_context, pentest_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds FROM reviews WHERE id = $1 AND requester_id = $2 FOR UPDATE")
         .bind(id).bind(caller.id).fetch_optional(&mut *tx).await?.ok_or_else(ApiError::missing)?;
     if current.request_id != input.request_id
         || current.payment_terms.as_ref().map(|terms| &terms.0) != Some(&input.price)
@@ -72,30 +72,42 @@ pub(crate) async fn fund(
     if used {
         return Err(ApiError::conflict("invoice_already_used"));
     }
-    let context = current
-        .website_context
-        .ok_or_else(|| ApiError::conflict("review_not_payable"))?;
-    let ids: Vec<_> = context
-        .reviewers
-        .iter()
-        .map(|reviewer| reviewer.device_id)
-        .collect();
-    let ready = websites::candidates(&mut tx, Some(&ids)).await?;
-    if ids.len() != 3
-        || ready.len() != 3
-        || context.reviewers.iter().any(|saved| !ready.contains(saved))
-    {
-        return Err(ApiError::conflict("selected_device_unavailable"));
-    }
     let review_seconds =
         patchriot_protocol::agent_review_seconds(current.agent_attempt_seconds as u64);
-    let retained: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM site_checks WHERE id = $1 AND evidence_expires_at > now() + make_interval(secs => $2) AND snapshot IS NOT NULL)")
-        .bind(context.site_check_id).bind(review_seconds as f64).fetch_one(&mut *tx).await?;
-    if !retained {
-        return Err(ApiError::conflict("snapshot_retention_too_short"));
+    if let Some(context) = current.source_context {
+        let ids: Vec<_> = context.reviewers.iter().map(|r| r.device_id).collect();
+        let ready = sources::candidates(&mut tx, Some(&ids)).await?;
+        if ids.len() != 3
+            || ready.len() != 3
+            || context.reviewers.iter().any(|saved| !ready.contains(saved))
+        {
+            return Err(ApiError::conflict("selected_device_unavailable"));
+        }
+        let retained: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM source_uploads WHERE id = $1 AND state = 'approved' AND expires_at > now() + make_interval(secs => $2) AND bundle IS NOT NULL)")
+            .bind(context.source_id).bind(review_seconds as f64).fetch_one(&mut *tx).await?;
+        if !retained {
+            return Err(ApiError::conflict("snapshot_retention_too_short"));
+        }
+        sources::bundle(&mut tx, id).await?;
+    } else {
+        let context = current
+            .website_context
+            .ok_or_else(|| ApiError::conflict("review_not_payable"))?;
+        let ids: Vec<_> = context.reviewers.iter().map(|r| r.device_id).collect();
+        let ready = websites::candidates(&mut tx, Some(&ids)).await?;
+        if ids.len() != 3
+            || ready.len() != 3
+            || context.reviewers.iter().any(|saved| !ready.contains(saved))
+        {
+            return Err(ApiError::conflict("selected_device_unavailable"));
+        }
+        let retained: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM site_checks WHERE id = $1 AND evidence_expires_at > now() + make_interval(secs => $2) AND snapshot IS NOT NULL)")
+            .bind(context.site_check_id).bind(review_seconds as f64).fetch_one(&mut *tx).await?;
+        if !retained {
+            return Err(ApiError::conflict("snapshot_retention_too_short"));
+        }
+        websites::snapshot(&mut tx, id).await?;
     }
-    // Recompute the saved snapshot binding before making the work eligible.
-    websites::snapshot(&mut tx, id).await?;
     sqlx::query("UPDATE reviews SET state = 'queued', funded_invoice_id = $2, funded_at = now(), deadline_at = now() + make_interval(secs => $3) WHERE id = $1")
         .bind(id).bind(input.invoice_id).bind(review_seconds as f64).execute(&mut *tx).await?;
     tx.commit().await?;

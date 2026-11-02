@@ -13,25 +13,32 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction, types::Json as DbJson};
 use uuid::Uuid;
 
 pub(crate) mod funding;
+pub(crate) mod pentests;
+pub(crate) mod sources;
 pub(crate) mod websites;
 
 type Tx<'a> = Transaction<'a, Postgres>;
 
 // A single short database lock keeps the prototype's queue/compute reservations
 // consistent across HTTP requests. Never hold this lock across network or work.
-async fn scheduler(tx: &mut Tx<'_>) -> Result<(), ApiError> {
+pub(crate) async fn scheduler(tx: &mut Tx<'_>) -> Result<(), ApiError> {
     sqlx::query("SELECT pg_advisory_xact_lock(72638102)")
         .execute(&mut **tx)
         .await?;
     Ok(())
 }
 
-async fn sweep(tx: &mut Tx<'_>) -> Result<(), ApiError> {
+pub(crate) async fn sweep(tx: &mut Tx<'_>) -> Result<(), ApiError> {
+    crate::sources::sweep(tx).await?;
+    sqlx::query("UPDATE reviews r SET state = 'failed' WHERE r.mode = 'pentest_agent' AND r.state IN ('queued','running') AND (EXISTS (SELECT 1 FROM review_steps s JOIN devices d ON d.id = s.assigned_device_id WHERE s.review_id = r.id AND (d.approval <> 'approved' OR NOT d.private_work_approved)) OR NOT EXISTS (SELECT 1 FROM pentests p WHERE p.id = r.pentest_id AND p.state = 'approved' AND p.expires_at > now()))")
+        .execute(&mut **tx).await?;
+    sqlx::query("UPDATE reviews r SET state = 'failed' WHERE r.mode = 'source_agent' AND r.state IN ('awaiting_payment','queued','running') AND (EXISTS (SELECT 1 FROM review_steps s JOIN devices d ON d.id = s.assigned_device_id WHERE s.review_id = r.id AND (d.approval <> 'approved' OR NOT d.private_work_approved)) OR NOT EXISTS (SELECT 1 FROM source_uploads u WHERE u.id = r.source_id AND u.state = 'approved' AND u.bundle IS NOT NULL AND u.expires_at > now()))")
+        .execute(&mut **tx).await?;
     sqlx::query("UPDATE reviews r SET state = 'failed' WHERE r.mode = 'website_agent' AND r.state IN ('awaiting_payment','queued','running') AND (EXISTS (SELECT 1 FROM review_steps s JOIN devices d ON d.id = s.assigned_device_id WHERE s.review_id = r.id AND (d.approval <> 'approved' OR NOT d.private_work_approved)) OR NOT EXISTS (SELECT 1 FROM site_checks w WHERE w.id = r.site_check_id AND w.snapshot IS NOT NULL AND w.evidence_expires_at > now()))")
         .execute(&mut **tx).await?;
     sqlx::query("UPDATE work_leases l SET state = 'expired' FROM review_steps s, reviews r, devices d WHERE l.state = 'active' AND s.id = l.step_id AND r.id = s.review_id AND d.id = l.device_id AND (l.expires_at <= now() OR l.deadline_at <= now() OR r.deadline_at <= now() OR d.approval <> 'approved')")
         .execute(&mut **tx).await?;
-    sqlx::query("UPDATE review_steps s SET state = CASE WHEN attempts < 3 THEN 'queued' ELSE 'failed' END FROM work_leases l WHERE s.current_lease_id = l.id AND s.state = 'leased' AND l.state = 'expired'")
+    sqlx::query("UPDATE review_steps s SET state = CASE WHEN attempts < (CASE WHEN r.mode = 'pentest_agent' THEN 1 ELSE 3 END) THEN 'queued' ELSE 'failed' END FROM work_leases l, reviews r WHERE s.current_lease_id = l.id AND r.id = s.review_id AND s.state = 'leased' AND l.state = 'expired'")
         .execute(&mut **tx).await?;
     sqlx::query("UPDATE reviews r SET state = 'failed' WHERE r.state IN ('awaiting_payment','queued','running') AND (r.deadline_at <= now() OR EXISTS (SELECT 1 FROM review_steps s WHERE s.review_id = r.id AND s.state = 'failed'))")
         .execute(&mut **tx).await?;
@@ -58,6 +65,8 @@ struct ReviewRow {
     mode: String,
     scenario: String,
     website_context: Option<DbJson<patchriot_protocol::website_reviews::WebsiteReviewContext>>,
+    source_context: Option<DbJson<patchriot_protocol::sources::SourceReviewContext>>,
+    pentest_context: Option<DbJson<patchriot_protocol::pentests::PentestContext>>,
     payment_terms: Option<DbJson<patchriot_protocol::website_reviews::ReviewPrice>>,
     payment_expires_at: Option<DateTime<Utc>>,
     funded_invoice_id: Option<Uuid>,
@@ -92,7 +101,7 @@ async fn views(
     caller: &Actor,
     id: Option<Uuid>,
 ) -> Result<Vec<ReviewView>, ApiError> {
-    let reviews = sqlx::query_as::<_, ReviewRow>("SELECT id, request_id, state, mode, scenario, website_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds FROM reviews WHERE (requester_id = $1 OR $2) AND ($3::uuid IS NULL OR id = $3) ORDER BY created_at DESC LIMIT 50")
+    let reviews = sqlx::query_as::<_, ReviewRow>("SELECT id, request_id, state, mode, scenario, website_context, source_context, pentest_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds FROM reviews WHERE (requester_id = $1 OR $2) AND ($3::uuid IS NULL OR id = $3) ORDER BY created_at DESC LIMIT 50")
         .bind(caller.id).bind(caller.admin).bind(id).fetch_all(pool).await?;
     let ids: Vec<_> = reviews.iter().map(|r| r.id).collect();
     let steps = sqlx::query_as::<_, StepRow>("SELECT s.review_id, s.role, s.state, s.attempts, l.device_id, l.operator_id, l.compute_group, CASE WHEN $2 THEN s.result ELSE NULL END AS result, s.fixture_matches, s.evidence_complete FROM review_steps s LEFT JOIN work_leases l ON l.id = s.current_lease_id WHERE s.review_id = ANY($1) ORDER BY s.position")
@@ -117,7 +126,11 @@ async fn views(
             id: review.id,
             request_id: review.request_id,
             scenario: serde_json::from_value(serde_json::Value::String(review.scenario))?,
-            evidence_source: if review.mode == "website_agent" {
+            evidence_source: if review.mode == "pentest_agent" {
+                "operator_reported_live_http_evidence_not_a_safety_verdict".into()
+            } else if review.mode == "source_agent" {
+                "operator_reported_static_source_review_not_a_safety_verdict".into()
+            } else if review.mode == "website_agent" {
                 "operator_reported_static_website_review_not_a_safety_verdict".into()
             } else if review.mode == "owned_agent" {
                 "agent_reported_owned_example_not_independently_verified".into()
@@ -130,6 +143,8 @@ async fn views(
             deadline_at: review.deadline_at.timestamp(),
             steps: parts,
             website: review.website_context.map(|context| context.0),
+            source: review.source_context.map(|context| context.0),
+            pentest: review.pentest_context.map(|context| context.0),
             payment: review
                 .payment_terms
                 .zip(review.payment_expires_at)
@@ -159,7 +174,10 @@ pub async fn create(
     Json(input): Json<CreateReview>,
 ) -> Result<Json<ReviewView>, ApiError> {
     let caller = actor(&headers, &state)?;
-    if input.mode == ReviewMode::WebsiteAgent || input.scenario != FixtureScenario::AccessControlV1
+    if matches!(
+        input.mode,
+        ReviewMode::WebsiteAgent | ReviewMode::SourceAgent | ReviewMode::PentestAgent
+    ) || input.scenario != FixtureScenario::AccessControlV1
     {
         return Err(ApiError::bad("website_review_requires_separate_consent"));
     }
@@ -276,6 +294,8 @@ struct Worker {
     approval: String,
     private_work_approved: bool,
     website_reviews: bool,
+    source_reviews: bool,
+    live_tests: bool,
     paused: bool,
     last_seen_at: Option<DateTime<Utc>>,
     work_sequence: i64,
@@ -283,7 +303,7 @@ struct Worker {
 }
 
 async fn worker(tx: &mut Tx<'_>, id: Uuid, key: &str) -> Result<Worker, ApiError> {
-    let worker = sqlx::query_as::<_, Worker>("SELECT public_key, operator_id, introduction, approval, private_work_approved, website_reviews, paused, last_seen_at, work_sequence, work_reply FROM devices WHERE id = $1 FOR UPDATE")
+    let worker = sqlx::query_as::<_, Worker>("SELECT public_key, operator_id, introduction, approval, private_work_approved, website_reviews, source_reviews, live_tests, paused, last_seen_at, work_sequence, work_reply FROM devices WHERE id = $1 FOR UPDATE")
         .bind(id).fetch_optional(&mut **tx).await?.ok_or_else(ApiError::missing)?;
     if worker.public_key != key {
         return Err(ApiError::denied());
@@ -303,6 +323,8 @@ struct AssignmentRow {
     mode: String,
     scenario: String,
     website_context: Option<DbJson<patchriot_protocol::website_reviews::WebsiteReviewContext>>,
+    source_context: Option<DbJson<patchriot_protocol::sources::SourceReviewContext>>,
+    pentest_context: Option<DbJson<patchriot_protocol::pentests::PentestContext>>,
 }
 impl AssignmentRow {
     fn assignment(self) -> Result<WorkAssignment, ApiError> {
@@ -313,6 +335,18 @@ impl AssignmentRow {
             scenario: serde_json::from_value(serde_json::Value::String(self.scenario))?,
             expires_at: self.expires_at.timestamp(),
             mode: serde_json::from_value(serde_json::Value::String(self.mode))?,
+            pentest: self.pentest_context.map(|context| {
+                patchriot_protocol::pentests::PentestAssignment {
+                    pentest_id: context.pentest_id,
+                    scope_sha256: context.scope_sha256.clone(),
+                }
+            }),
+            source: self.source_context.map(|context| {
+                patchriot_protocol::sources::SourceAssignment {
+                    source_id: context.source_id,
+                    snapshot_sha256: context.snapshot_sha256.clone(),
+                }
+            }),
             website: self.website_context.map(|context| {
                 patchriot_protocol::website_reviews::WebsiteAssignment {
                     site_check_id: context.site_check_id,
@@ -337,18 +371,39 @@ pub async fn poll(
     scheduler(&mut tx).await?;
     sweep(&mut tx).await?;
     let device = worker(&mut tx, id, &request.public_key).await?;
-    let modes = match device.introduction.runtime {
+    let mut modes = match device.introduction.runtime {
         RuntimeKind::OwnedFixture => vec!["owned_fixture"],
-        RuntimeKind::Hermes if request.payload.website_reviews && device.private_work_approved => {
-            vec!["owned_agent", "website_agent"]
-        }
+        RuntimeKind::Hermes if request.payload.live_tests => Vec::new(),
         RuntimeKind::Hermes => vec!["owned_agent"],
     };
-    if request.payload.website_reviews && device.introduction.runtime != RuntimeKind::Hermes {
+    if (request.payload.website_reviews
+        || request.payload.source_reviews
+        || request.payload.live_tests)
+        && device.introduction.runtime != RuntimeKind::Hermes
+    {
         return Err(ApiError::bad("website_reviews_require_agent"));
     }
+    if request.payload.live_tests
+        && device.introduction.declared_model.as_deref() != Some("abliterated-model-large-v2")
+    {
+        return Err(ApiError::bad("live_model_not_supported"));
+    }
+    if device.private_work_approved {
+        if request.payload.live_tests {
+            modes.push("pentest_agent");
+        }
+        if request.payload.website_reviews {
+            modes.push("website_agent");
+        }
+        if request.payload.source_reviews {
+            modes.push("source_agent");
+        }
+    }
     if seq as i64 == device.work_sequence {
-        if request.payload.website_reviews != device.website_reviews {
+        if request.payload.website_reviews != device.website_reviews
+            || request.payload.source_reviews != device.source_reviews
+            || request.payload.live_tests != device.live_tests
+        {
             return Err(ApiError::conflict("conflicting_poll_replay"));
         }
         let reply = device
@@ -374,7 +429,7 @@ pub async fn poll(
             .last_seen_at
             .is_some_and(|seen| now() - seen.timestamp() < 30)
     {
-        let existing = sqlx::query_as::<_, AssignmentRow>("SELECT l.id, s.review_id, s.role, l.expires_at, r.mode, r.scenario, r.website_context FROM work_leases l JOIN review_steps s ON s.id = l.step_id JOIN reviews r ON r.id = s.review_id WHERE l.device_id = $1 AND l.state = 'active'")
+        let existing = sqlx::query_as::<_, AssignmentRow>("SELECT l.id, s.review_id, s.role, l.expires_at, r.mode, r.scenario, r.website_context, r.source_context, r.pentest_context FROM work_leases l JOIN review_steps s ON s.id = l.step_id JOIN reviews r ON r.id = s.review_id WHERE l.device_id = $1 AND l.state = 'active'")
             .bind(id).fetch_optional(&mut *tx).await?;
         if let Some(existing) = existing {
             if modes.contains(&existing.mode.as_str()) {
@@ -403,18 +458,20 @@ pub async fn poll(
                         .bind(review_id)
                         .execute(&mut *tx)
                         .await?;
-                    assignment = Some(sqlx::query_as::<_, AssignmentRow>("SELECT l.id, s.review_id, s.role, l.expires_at, r.mode, r.scenario, r.website_context FROM work_leases l JOIN review_steps s ON s.id = l.step_id JOIN reviews r ON r.id = s.review_id WHERE l.id = $1")
+                    assignment = Some(sqlx::query_as::<_, AssignmentRow>("SELECT l.id, s.review_id, s.role, l.expires_at, r.mode, r.scenario, r.website_context, r.source_context, r.pentest_context FROM work_leases l JOIN review_steps s ON s.id = l.step_id JOIN reviews r ON r.id = s.review_id WHERE l.id = $1")
                         .bind(lease).fetch_one(&mut *tx).await?.assignment()?);
                 }
             }
         }
     }
     let reply = WorkReply { assignment };
-    sqlx::query("UPDATE devices SET work_sequence = $1, work_reply = $2, website_reviews = $4, work_polled_at = now() WHERE id = $3")
+    sqlx::query("UPDATE devices SET work_sequence = $1, work_reply = $2, website_reviews = $4, source_reviews = $5, live_tests = $6, work_polled_at = now() WHERE id = $3")
         .bind(seq as i64)
         .bind(DbJson(&reply))
         .bind(id)
         .bind(request.payload.website_reviews)
+        .bind(request.payload.source_reviews)
+        .bind(request.payload.live_tests)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -472,7 +529,11 @@ pub async fn renew(
     let device = worker(&mut tx, id, &request.public_key).await?;
     let current = lease(&mut tx, input.lease_id).await?;
     active(&current, id, input.lease_id)?;
-    if current.mode == "website_agent" && (!device.private_work_approved || !device.website_reviews)
+    if (current.mode == "pentest_agent" && (!device.private_work_approved || !device.live_tests))
+        || (current.mode == "website_agent"
+            && (!device.private_work_approved || !device.website_reviews))
+        || (current.mode == "source_agent"
+            && (!device.private_work_approved || !device.source_reviews))
     {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
@@ -513,8 +574,18 @@ pub async fn complete(
     Json(request): Json<SignedRequest<CompleteWork>>,
 ) -> Result<Json<WorkAccepted>, ApiError> {
     verify(&request, &state, &format!("/v1/devices/{id}/work/complete"))?;
-    let input = request.payload;
+    let mut input = request.payload;
+    if !matches!(input.result, WorkResult::Pentest(_))
+        && serde_json::to_vec(&input)?.len() > 64 * 1024
+    {
+        return Err(ApiError::bad("result_too_large"));
+    }
     let hash = payload_hash(&input)?;
+    // Preserve the signed payload hash for replay checks. Binary response
+    // excerpts cannot be stored as JSONB text; their source hashes remain intact.
+    if let WorkResult::Pentest(result) = &mut input.result {
+        result.omit_binary_excerpts();
+    }
     let mut tx = state.pool.begin().await?;
     scheduler(&mut tx).await?;
     sweep(&mut tx).await?;
@@ -560,6 +631,41 @@ pub async fn complete(
             return Err(ApiError::bad("wrong_snapshot"));
         }
         (None, Some(result.evidence_complete(&snapshot)))
+    } else if let WorkResult::Source(result) = &input.result {
+        if !device.private_work_approved
+            || !device.source_reviews
+            || !result.valid()
+            || device.introduction.declared_model.as_deref()
+                != Some(&result.execution.declared_model)
+        {
+            return Err(ApiError::bad("invalid_source_evidence"));
+        }
+        let bundle = sources::bundle(&mut tx, lease.review_id).await?;
+        if patchriot_protocol::sources::bundle_hash(&bundle)? != result.snapshot_sha256 {
+            return Err(ApiError::bad("wrong_snapshot"));
+        }
+        (None, Some(result.evidence_complete(&bundle)))
+    } else if let WorkResult::Pentest(result) = &mut input.result {
+        let context = pentests::context(&mut tx, lease.review_id).await?;
+        // Preserve raw model output, but accept an otherwise valid report with
+        // ordinary introductory text. No missing fields or evidence are guessed.
+        if result.assessment.is_none()
+            && result.execution.state
+                == patchriot_protocol::website_reviews::WebsiteRunState::Completed
+        {
+            result.assessment = patchriot_protocol::pentests::parse_assessment(&result.raw_summary);
+            if !result.valid(&context.scope) {
+                result.assessment = None;
+            }
+        }
+        if !device.private_work_approved
+            || !device.live_tests
+            || !result.valid(&context.scope)
+            || device.introduction.declared_model.as_deref() != Some(&result.execution.model)
+        {
+            return Err(ApiError::bad("invalid_live_evidence"));
+        }
+        (None, Some(result.evidence_complete(&context.scope)))
     } else {
         (Some(input.result.matches_fixture()), None)
     };
@@ -567,7 +673,7 @@ pub async fn complete(
         .bind(hash).bind(matches).bind(input.lease_id).bind(evidence_complete).execute(&mut *tx).await?;
     sqlx::query("UPDATE review_steps SET state = 'completed', result = $1, fixture_matches = $2, evidence_complete = $4 WHERE id = $3")
         .bind(DbJson(input.result)).bind(matches).bind(lease.step_id).bind(evidence_complete).execute(&mut *tx).await?;
-    sqlx::query("UPDATE reviews SET state = CASE WHEN (SELECT bool_and(CASE WHEN reviews.mode = 'website_agent' THEN evidence_complete ELSE fixture_matches END) FROM review_steps WHERE review_id = $1) THEN 'completed' ELSE 'needs_review' END WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM review_steps WHERE review_id = $1 AND state <> 'completed')")
+    sqlx::query("UPDATE reviews SET state = CASE WHEN (SELECT bool_and(CASE WHEN reviews.mode IN ('website_agent','source_agent','pentest_agent') THEN evidence_complete ELSE fixture_matches END) FROM review_steps WHERE review_id = $1) THEN 'completed' ELSE 'needs_review' END WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM review_steps WHERE review_id = $1 AND state <> 'completed')")
         .bind(lease.review_id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(Json(WorkAccepted {

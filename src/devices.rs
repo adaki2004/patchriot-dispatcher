@@ -32,6 +32,7 @@ struct DeviceRow {
     approval: String,
     private_work_approved: bool,
     website_reviews: bool,
+    live_tests: bool,
     last_seen_at: Option<DateTime<Utc>>,
     sequence: i64,
     last_payload_hash: Option<String>,
@@ -69,10 +70,12 @@ impl DeviceRow {
             runtime: intro.runtime,
             runtime_version: intro.runtime_version.clone(),
             declared_model: intro.declared_model.clone(),
+            reported_os: intro.reported_os.clone(),
             compute_group: intro.compute_group.clone(),
             approval: self.approval.clone(),
             private_work_approved: self.private_work_approved,
             website_reviews: self.website_reviews,
+            live_tests: self.live_tests,
             state: self.state().into(),
             last_seen_at: self.last_seen_at.map(|t| t.timestamp()),
             sequence: self.sequence as u64,
@@ -267,6 +270,39 @@ pub async fn list(
                 let mut view = row.view();
                 view.reports_received = Some(counts.get(&row.id).copied().unwrap_or(0) as u64);
                 view
+            })
+            .collect(),
+    ))
+}
+
+pub async fn pairing_info(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<PairingDeployment>, ApiError> {
+    actor(&headers, &state)?;
+    Ok(Json(PairingDeployment {
+        audience: state.audience.to_string(),
+    }))
+}
+
+pub async fn agents(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<AgentSummary>>, ApiError> {
+    actor(&headers, &state)?;
+    let rows = sqlx::query_as::<_, DeviceRow>(
+        "SELECT d.*, o.display_name AS operator_name FROM devices d JOIN operators o ON o.id = d.operator_id WHERE d.approval = 'approved' ORDER BY d.last_seen_at DESC NULLS LAST, d.id LIMIT 200",
+    ).fetch_all(&state.pool).await?;
+    Ok(Json(
+        rows.iter()
+            .map(|row| AgentSummary {
+                id: row.id,
+                reported_os: row.introduction.reported_os.clone(),
+                runtime: row.introduction.runtime,
+                runtime_version: row.introduction.runtime_version.clone(),
+                declared_model: row.introduction.declared_model.clone(),
+                state: row.state().into(),
+                last_seen_at: row.last_seen_at.map(|time| time.timestamp()),
             })
             .collect(),
     ))

@@ -5,7 +5,7 @@ use axum::{
 };
 use chrono::Utc;
 use http_body_util::BodyExt;
-use patchriot_dispatcher::{AppState, router};
+use patchriot_dispatcher::{AppState, relay_router, router};
 use patchriot_protocol::*;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -13,13 +13,77 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+#[path = "pentests/mod.rs"]
+mod live_tests;
 #[path = "sites/mod.rs"]
 mod sites;
+#[path = "sources/mod.rs"]
+mod source_reviews;
 #[path = "sites/reviews.rs"]
 mod website_reviews;
 
+#[tokio::test]
+async fn admitted_agent_directory_excludes_operator_details_and_unapproved_devices() {
+    let test = TestApp::new().await;
+    let key = DeviceKey::from_bytes(&[201; 32]);
+    let id = test.online(&key).await;
+    let pending_key = DeviceKey::from_bytes(&[202; 32]);
+    let pending = test.paired(&pending_key).await;
+    let caller = Some((Uuid::new_v4(), false));
+    for path in ["/internal/agents", "/internal/pairing-info"] {
+        assert_eq!(
+            test.request("GET", path, Value::Null, None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let (status, body) = test
+        .request("GET", "/internal/agents", Value::Null, caller)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let agents = body.as_array().unwrap();
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0]["id"], id.to_string());
+    assert_ne!(agents[0]["id"], pending.to_string());
+    assert_eq!(agents[0]["reported_os"], "linux");
+    assert_eq!(agents[0]["state"], "online");
+    let mut fields: Vec<_> = agents[0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort();
+    assert_eq!(
+        fields,
+        [
+            "declared_model",
+            "id",
+            "last_seen_at",
+            "reported_os",
+            "runtime",
+            "runtime_version",
+            "state"
+        ]
+    );
+    let (_, info) = test
+        .request("GET", "/internal/pairing-info", Value::Null, caller)
+        .await;
+    assert_eq!(info, json!({"audience":"test-deployment"}));
+    sqlx::query("UPDATE devices SET approval = 'revoked' WHERE id = $1")
+        .bind(id)
+        .execute(&test.pool)
+        .await
+        .unwrap();
+    let (_, after) = test
+        .request("GET", "/internal/agents", Value::Null, caller)
+        .await;
+    assert_eq!(after, json!([]));
+    test.finish().await;
+}
+
 struct TestApp {
     app: Router,
+    relay: Option<Router>,
     pool: PgPool,
     admin_pool: PgPool,
     schema: String,
@@ -74,6 +138,7 @@ impl TestApp {
         );
         Self {
             app,
+            relay: None,
             pool,
             admin_pool,
             schema,
@@ -125,15 +190,18 @@ impl TestApp {
                 .header("x-patchriot-account", id.to_string())
                 .header("x-patchriot-role", if admin { "admin" } else { "member" });
         }
-        let response = self
-            .app
-            .clone()
-            .oneshot(
-                req.body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = if path.starts_with("/v1/") {
+            self.relay.as_ref().unwrap_or(&self.app)
+        } else {
+            &self.app
+        }
+        .clone()
+        .oneshot(
+            req.body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
         let status = response.status();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
@@ -159,6 +227,7 @@ impl TestApp {
             runtime: RuntimeKind::OwnedFixture,
             runtime_version: "0.0.1".into(),
             declared_model: None,
+            reported_os: Some("linux".into()),
             compute_group: "shared-demo-machine".into(),
             slots: 1,
         }
@@ -237,6 +306,8 @@ impl TestApp {
                 WorkPoll {
                     sequence,
                     website_reviews: false,
+                    source_reviews: false,
+                    live_tests: false,
                 },
             )
             .await;
@@ -669,6 +740,83 @@ fn fixture_result() -> FixtureResult {
 }
 
 #[tokio::test]
+async fn relay_gateway_preserves_signed_pairing_approval_and_work_delivery() {
+    let mut test = TestApp::new().await;
+    test.relay = Some(relay_router(
+        AppState::new(
+            test.pool.clone(),
+            test.internal_key.clone(),
+            "test-deployment".into(),
+        )
+        .unwrap(),
+    ));
+    let review = test.review(Uuid::new_v4()).await;
+    let key = DeviceKey::from_bytes(&[79; 32]);
+    let id = test.paired(&key).await;
+    let pending = test
+        .signed(
+            &key,
+            &format!("/v1/devices/{id}/heartbeat"),
+            Heartbeat {
+                sequence: 1,
+                paused: false,
+                running: 0,
+            },
+        )
+        .await;
+    assert_eq!(pending.0, StatusCode::OK);
+    assert_eq!(pending.1["state"], "awaiting_approval");
+    let unapproved = test
+        .signed(
+            &key,
+            &format!("/v1/devices/{id}/work/poll"),
+            WorkPoll {
+                sequence: 1,
+                website_reviews: false,
+                source_reviews: false,
+                live_tests: false,
+            },
+        )
+        .await;
+    assert_eq!(unapproved.0, StatusCode::FORBIDDEN);
+    test.approve(id).await;
+    let heartbeat = test
+        .signed(
+            &key,
+            &format!("/v1/devices/{id}/heartbeat"),
+            Heartbeat {
+                sequence: 2,
+                paused: false,
+                running: 0,
+            },
+        )
+        .await;
+    assert_eq!(heartbeat.0, StatusCode::OK, "{}", heartbeat.1);
+    let wrong_key = DeviceKey::from_bytes(&[80; 32]);
+    let wrong = test
+        .signed(
+            &wrong_key,
+            &format!("/v1/devices/{id}/work/poll"),
+            WorkPoll {
+                sequence: 1,
+                website_reviews: false,
+                source_reviews: false,
+                live_tests: false,
+            },
+        )
+        .await;
+    assert_eq!(wrong.0, StatusCode::UNAUTHORIZED);
+    let assignment = test.work(&key, id, 1).await.unwrap();
+    assert_eq!(assignment.review_id, review.id);
+    let (status, body) = test
+        .complete_work(&key, id, assignment.lease_id, fixture_result())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["fixture_matches"], true);
+    test.finish().await;
+}
+
+#[tokio::test]
 async fn queued_fixture_uses_three_distinct_devices_and_preserves_requester_privacy() {
     let test = TestApp::new().await;
     let request = Uuid::new_v4();
@@ -781,6 +929,8 @@ async fn concurrent_polls_share_one_compute_slot_and_replays_do_not_extend_lease
             WorkPoll {
                 sequence: 1,
                 website_reviews: false,
+                source_reviews: false,
+                live_tests: false,
             },
         )
         .await;
@@ -1023,7 +1173,9 @@ async fn queue_capacity_unsupported_targets_and_ineligible_devices_fail_before_a
             &format!("/v1/devices/{id}/work/poll"),
             WorkPoll {
                 sequence: 1,
-                website_reviews: false
+                website_reviews: false,
+                source_reviews: false,
+                live_tests: false,
             }
         )
         .await
@@ -1056,7 +1208,9 @@ async fn queue_capacity_unsupported_targets_and_ineligible_devices_fail_before_a
             &format!("/v1/devices/{id}/work/poll"),
             WorkPoll {
                 sequence: 3,
-                website_reviews: false
+                website_reviews: false,
+                source_reviews: false,
+                live_tests: false,
             }
         )
         .await

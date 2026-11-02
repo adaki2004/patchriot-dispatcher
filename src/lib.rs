@@ -82,18 +82,53 @@ pub async fn connect(url: &str) -> Result<PgPool, sqlx::Error> {
     Ok(pool)
 }
 
-pub fn router(state: AppState) -> Router {
+fn device_routes() -> Router<AppState> {
     Router::new()
+        .route("/v1/fleet", get(devices::fleet))
+        .route("/v1/pairings/start", post(devices::start))
+        .route("/v1/pairings/status", post(devices::pairing_status))
+        .route("/v1/devices/{id}/heartbeat", post(devices::heartbeat))
+        .route(
+            "/v1/devices/{id}/work/source-evidence",
+            post(reviews::sources::evidence),
+        )
+        .route(
+            "/v1/devices/{id}/work/pentest-evidence",
+            post(reviews::pentests::evidence),
+        )
+        .route("/v1/devices/{id}/work/poll", post(reviews::poll))
+        .route("/v1/devices/{id}/work/renew", post(reviews::renew))
+        .route(
+            "/v1/devices/{id}/work/evidence",
+            post(reviews::websites::evidence),
+        )
+        .route(
+            "/v1/devices/{id}/work/complete",
+            post(reviews::complete).layer(DefaultBodyLimit::max(
+                patchriot_protocol::pentests::MAX_RESULT_BYTES + 8192,
+            )),
+        )
+}
+
+fn finish_router(router: Router<AppState>, state: AppState) -> Router {
+    router
+        .layer(DefaultBodyLimit::max(16 * 1024))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ))
+        .with_state(state)
+}
+
+/// Existing internal/local listener. Keep this on loopback when using the mesh gateway.
+pub fn router(state: AppState) -> Router {
+    let router = device_routes()
         .route(
             "/health",
             get(|| async {
                 Json(serde_json::json!({"status": "ok", "version": env!("CARGO_PKG_VERSION")}))
             }),
         )
-        .route("/v1/fleet", get(devices::fleet))
-        .route("/v1/pairings/start", post(devices::start))
-        .route("/v1/pairings/status", post(devices::pairing_status))
-        .route("/v1/devices/{id}/heartbeat", post(devices::heartbeat))
         .route("/internal/pairings/claim", post(devices::claim))
         .route("/internal/pairing-info", get(devices::pairing_info))
         .route("/internal/agents", get(devices::agents))
@@ -144,6 +179,22 @@ pub fn router(state: AppState) -> Router {
                     patchriot_protocol::sources::MAX_SOURCE_BODY_BYTES,
                 )),
         )
+        .route(
+            "/internal/pentests",
+            get(reviews::pentests::list).post(reviews::pentests::create),
+        )
+        .route(
+            "/internal/pentests/{id}/decision",
+            post(reviews::pentests::decide),
+        )
+        .route(
+            "/internal/pentests/{id}/review-plan",
+            get(reviews::pentests::plan),
+        )
+        .route(
+            "/internal/pentests/{id}/review",
+            post(reviews::pentests::start),
+        )
         .route("/internal/sources/{id}", get(sources::detail))
         .route("/internal/sources/{id}/decision", post(sources::decide))
         .route("/internal/sources/{id}/delete", post(sources::delete))
@@ -159,27 +210,17 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/internal/sources/{id}/admit-review",
             post(reviews::sources::admit),
-        )
-        .route(
-            "/v1/devices/{id}/work/source-evidence",
-            post(reviews::sources::evidence),
-        )
-        .route("/v1/devices/{id}/work/poll", post(reviews::poll))
-        .route("/v1/devices/{id}/work/renew", post(reviews::renew))
-        .route(
-            "/v1/devices/{id}/work/evidence",
-            post(reviews::websites::evidence),
-        )
-        .route(
-            "/v1/devices/{id}/work/complete",
-            post(reviews::complete).layer(DefaultBodyLimit::max(64 * 1024)),
-        )
-        .layer(DefaultBodyLimit::max(16 * 1024))
-        .layer(SetResponseHeaderLayer::overriding(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("no-store"),
-        ))
-        .with_state(state)
+        );
+    finish_router(router, state)
+}
+
+/// Agent-facing listener for Tailscale Serve. Internal routes do not exist here,
+/// even if a client supplies the internal service key or forged proxy headers.
+/// Tailscale limits network access; device signatures and approval still apply.
+pub fn relay_router(state: AppState) -> Router {
+    finish_router(device_routes().route("/health", get(|| async {
+        Json(serde_json::json!({"status": "ok", "service": "patchriot-relay-gateway", "version": env!("CARGO_PKG_VERSION")}))
+    })), state)
 }
 
 #[derive(Serialize)]

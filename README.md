@@ -5,7 +5,7 @@ The Rust service that approves devices, queues reviews and assigns work to agent
 
 > **DON'T TRUST! VERIFY!** Audit the implementation and test its permission boundaries. Use authorized penetration tests against your own deployment. Private source, signed results and model confidence do not establish security.
 
-**Working today:** persistent onboarding, owned example checks, approved website snapshots and explicitly shared offline agent reviews. Internal admission can hold an agreed review until core confirms payment. Reports separate tool observations from model claims. Core provides configurable browser checkout; active target testing is not enabled.
+**Working today:** persistent onboarding, owned example checks, approved website snapshots and explicitly shared offline agent reviews. Internal admission can hold an agreed review until core confirms payment. Reports separate tool observations from model claims. Core provides configurable browser checkout. A separate live HTTP pilot uses exact target approval, external-provider consent and recorded requests.
 
 ## Developer setup: run your own dispatcher
 
@@ -19,6 +19,7 @@ Keep `patchriot-core` beside this repository for the Apache-2.0 protocol crate. 
 | `PATCHRIOT_INTERNAL_KEY` | Generated service secret, at least 32 bytes; shared with core |
 | `PATCHRIOT_AUDIENCE` | Stable deployment identifier, e.g. `patchriot-local-v1` |
 | `PATCHRIOT_BIND` | Optional listener; default `127.0.0.1:7411` |
+| `PATCHRIOT_RELAY_BIND` | Optional agent-only listener for Tailscale Serve, e.g. `127.0.0.1:7412`; requires both listeners on loopback |
 | `PATCHRIOT_AGENT_ATTEMPT_SECONDS` | Optional agent limit: `600` by default, at most `1800` |
 | `PATCHRIOT_JEV_OPENROUTER_KEY` | Optional server-only OpenRouter key for consented request screening |
 
@@ -27,6 +28,40 @@ cargo run --locked
 ```
 
 Migrations are embedded. Use HTTPS or an authenticated tunnel outside loopback. Internal requests require the service secret plus account/role headers **constructed by core from its session**, never copied from a browser.
+
+## Connect agents over Tailscale
+
+The website can stay on its public HTTPS address. Agent machines join a private tailnet and reach a separate **agent-only gateway**. Core continues using the internal listener. Use a dedicated deployment and database for each private organization; this is a manual setup path, not hosted tenant isolation. The commands below assume core and dispatcher share a service host or network namespace. Separate hosts need their own private internal connection; an agent gateway does not expose core's internal API.
+
+```text
+Browser → Core → internal dispatcher :7411
+Agent → Relay → Tailscale HTTPS :443 → agent gateway :7412
+```
+
+1. Admit the dispatcher and approved agent machines to your tailnet. Apply [the example grants and policy tests](deploy/tailscale-policy.example.json) in the Tailscale admin console. They allow agents to reach the dispatcher on port 443. Review the whole policy: an existing broad allow rule can also grant access. Do not grant agent-to-agent, SSH, database or internal-port access just to make pairing work.
+2. Set `PATCHRIOT_BIND=127.0.0.1:7411` and `PATCHRIOT_RELAY_BIND=127.0.0.1:7412`, then restart this service. Both ports must remain loopback-only. The second listener has health and device routes; `/internal/*` returns 404 even with the service key.
+3. On that dispatcher machine, inspect existing Serve configuration before configuring a dedicated endpoint:
+
+```sh
+tailscale serve status
+tailscale serve --bg --https=443 http://127.0.0.1:7412
+```
+
+Use **Serve**, which shares within the tailnet. Do not enable Funnel on this endpoint or proxy port 7411. Serve provisions HTTPS after tailnet consent; keep certificate checks enabled. See [Serve](https://tailscale.com/docs/features/tailscale-serve) and [grants](https://tailscale.com/docs/features/access-control/grants).
+
+4. Set core's `PATCHRIOT_RELAY_ORIGIN` to the resulting `https://device.tailnet.ts.net` address. Keep `PATCHRIOT_DISPATCHER_URL` on the private internal connection. On each agent machine, run `patchriot-relay mesh-check --dispatcher https://device.tailnet.ts.net`, then use the ordinary pairing steps.
+
+The relay signs the same requests as before. Tailnet membership does not approve a device, select an operator or grant a review lease. Revoking a device stops application access independently of the tailnet. No Tailscale login/header is trusted as a Patchriot account. If the connection drops, the existing lease deadline still stops work; there is no public-network fallback.
+
+Leaving `PATCHRIOT_RELAY_BIND` unset preserves the existing local/internal setup. Network credentials belong in Tailscale's private machine state, never the repo, browser or model container. The example policy is a starting configuration; validate it against the actual tailnet before connecting operators.
+
+## What coordinates the agents?
+
+**Rust schedules the work.** There is no lead Hermes agent in the dispatcher. Code checks permissions, records the agreed team and assigns investigator, reproducer and challenger roles. Workers use Hermes through the relay’s isolated adapter: local models for offline modes, or the explicitly configured hosted provider for live HTTP tests.
+
+JEV is an optional, separate scope-screening call through OpenRouter. It receives only the consented scope and permission note, and cannot approve work or change tool permissions. Its decisions API is not interchangeable with a chat-completions model.
+
+A lower-cost model can later help clarify a request or summarize evidence. Select it using owned security-review examples, including false-positive checks and legitimate tasks it refuses. A model advertised as uncensored is not a capability or reliability guarantee. Keep actual authorization, tool limits and payment rules in code. Private material must not be sent to a different provider without the required disclosure and consent.
 
 <details>
 <summary><strong>Run as a Linux service</strong></summary>
@@ -176,6 +211,16 @@ Core sends bounded text to `/internal/sources`: 1–12 UTF-8 files, at most 16 K
 
 An admin approves the immutable bundle. The owner then confirms three eligible devices; each needs private-work approval and the separate signed `source_reviews: true` opt-in. The `source_agent` mode uses the existing sequential roles, capacity limits, saved deadlines and payment gate. Older polls preserve their signatures and cannot receive source work.
 
-Only a live assigned lease can read `/v1/devices/:id/work/source-evidence`. The relay uses adapter 4 to inspect source excerpts without model tools, network access or code execution. Exact quoted text and file hashes are checked on completion; matching evidence does not establish correct security reasoning. No JEV provider receives source files in this slice.
+Only a live assigned lease can read `/v1/devices/:id/work/source-evidence`. The relay uses adapter 4 or 5 to inspect source excerpts without model tools, network access or code execution. Exact quoted text and file hashes are checked on completion; matching evidence does not establish correct security reasoning. No JEV provider receives source files in this slice.
 
 Raw bundles expire after seven days. Owner deletion cancels unfinished reviews and removes raw files; metadata, decisions and reports remain. The periodic collector and queue cleanup remove expired bytes. Revocation stops further reads, renewals and results, but cannot recall data already seen. Intake caps are five retained uploads and 20 daily submissions per owner, with 200 retained globally.
+
+## Live website pilot
+
+`pentest_agent` / `live_http_v1` is separate from snapshot collection. Migration `0012` stores an immutable origin/method/objective scope, owner permission note, admin decision and 24-hour expiry. The owner selects three private-approved devices with the signed `live_tests` opt-in and separately consents to operator and **abliteration.ai** access. Existing device polls omit that flag and remain compatible.
+
+Internal routes are `GET/POST /internal/pentests`, `POST /internal/pentests/:id/decision`, `GET /internal/pentests/:id/review-plan` and `POST /internal/pentests/:id/review`. Core only exposes live starts in `pilot` access mode; this does not bypass paid/coupon admission for other work. Operator earnings and live-mode checkout are not enabled.
+
+Roles stay pinned and run sequentially. Only their active device lease can download scope and prior reports at `/v1/devices/:id/work/pentest-evidence`. The agent-only gateway exposes that signed route, never the internal admin routes. Scope expiry, permission revocation, cancellation or removed device approval blocks further evidence access and renewals. There is one execution attempt per live role; result delivery can retry without running the model again.
+
+The relay restricts target requests to approved HTTPS origins and public IPs, records HTTP evidence, and keeps the hosted-provider key outside the agent container. The dispatcher validates report bounds, scope and cited evidence IDs. `evidence_complete` means the required report material arrived; it does not prove a vulnerability or certify operator honesty. Missing or conflicting evidence still needs review. Returned live reports retain bounded excerpts in private history.

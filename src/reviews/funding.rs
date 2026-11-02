@@ -40,7 +40,7 @@ pub(crate) async fn fund(
     sweep(&mut tx).await?;
     // Even staff must act as the paying account. Payment never grants consent
     // on another requester's behalf.
-    let current: ReviewRow = sqlx::query_as("SELECT id, request_id, state, mode, scenario, website_context, source_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds FROM reviews WHERE id = $1 AND requester_id = $2 FOR UPDATE")
+    let current: ReviewRow = sqlx::query_as("SELECT id, request_id, state, mode, scenario, website_context, source_context, pentest_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds FROM reviews WHERE id = $1 AND requester_id = $2 FOR UPDATE")
         .bind(id).bind(caller.id).fetch_optional(&mut *tx).await?.ok_or_else(ApiError::missing)?;
     if current.request_id != input.request_id
         || current.payment_terms.as_ref().map(|terms| &terms.0) != Some(&input.price)

@@ -5,7 +5,7 @@ use axum::{
 };
 use chrono::Utc;
 use http_body_util::BodyExt;
-use patchriot_dispatcher::{AppState, router};
+use patchriot_dispatcher::{AppState, relay_router, router};
 use patchriot_protocol::*;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -13,6 +13,8 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+#[path = "pentests/mod.rs"]
+mod live_tests;
 #[path = "sites/mod.rs"]
 mod sites;
 #[path = "sources/mod.rs"]
@@ -81,6 +83,7 @@ async fn admitted_agent_directory_excludes_operator_details_and_unapproved_devic
 
 struct TestApp {
     app: Router,
+    relay: Option<Router>,
     pool: PgPool,
     admin_pool: PgPool,
     schema: String,
@@ -135,6 +138,7 @@ impl TestApp {
         );
         Self {
             app,
+            relay: None,
             pool,
             admin_pool,
             schema,
@@ -186,15 +190,18 @@ impl TestApp {
                 .header("x-patchriot-account", id.to_string())
                 .header("x-patchriot-role", if admin { "admin" } else { "member" });
         }
-        let response = self
-            .app
-            .clone()
-            .oneshot(
-                req.body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = if path.starts_with("/v1/") {
+            self.relay.as_ref().unwrap_or(&self.app)
+        } else {
+            &self.app
+        }
+        .clone()
+        .oneshot(
+            req.body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
         let status = response.status();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
@@ -300,6 +307,7 @@ impl TestApp {
                     sequence,
                     website_reviews: false,
                     source_reviews: false,
+                    live_tests: false,
                 },
             )
             .await;
@@ -732,6 +740,83 @@ fn fixture_result() -> FixtureResult {
 }
 
 #[tokio::test]
+async fn relay_gateway_preserves_signed_pairing_approval_and_work_delivery() {
+    let mut test = TestApp::new().await;
+    test.relay = Some(relay_router(
+        AppState::new(
+            test.pool.clone(),
+            test.internal_key.clone(),
+            "test-deployment".into(),
+        )
+        .unwrap(),
+    ));
+    let review = test.review(Uuid::new_v4()).await;
+    let key = DeviceKey::from_bytes(&[79; 32]);
+    let id = test.paired(&key).await;
+    let pending = test
+        .signed(
+            &key,
+            &format!("/v1/devices/{id}/heartbeat"),
+            Heartbeat {
+                sequence: 1,
+                paused: false,
+                running: 0,
+            },
+        )
+        .await;
+    assert_eq!(pending.0, StatusCode::OK);
+    assert_eq!(pending.1["state"], "awaiting_approval");
+    let unapproved = test
+        .signed(
+            &key,
+            &format!("/v1/devices/{id}/work/poll"),
+            WorkPoll {
+                sequence: 1,
+                website_reviews: false,
+                source_reviews: false,
+                live_tests: false,
+            },
+        )
+        .await;
+    assert_eq!(unapproved.0, StatusCode::FORBIDDEN);
+    test.approve(id).await;
+    let heartbeat = test
+        .signed(
+            &key,
+            &format!("/v1/devices/{id}/heartbeat"),
+            Heartbeat {
+                sequence: 2,
+                paused: false,
+                running: 0,
+            },
+        )
+        .await;
+    assert_eq!(heartbeat.0, StatusCode::OK, "{}", heartbeat.1);
+    let wrong_key = DeviceKey::from_bytes(&[80; 32]);
+    let wrong = test
+        .signed(
+            &wrong_key,
+            &format!("/v1/devices/{id}/work/poll"),
+            WorkPoll {
+                sequence: 1,
+                website_reviews: false,
+                source_reviews: false,
+                live_tests: false,
+            },
+        )
+        .await;
+    assert_eq!(wrong.0, StatusCode::UNAUTHORIZED);
+    let assignment = test.work(&key, id, 1).await.unwrap();
+    assert_eq!(assignment.review_id, review.id);
+    let (status, body) = test
+        .complete_work(&key, id, assignment.lease_id, fixture_result())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["fixture_matches"], true);
+    test.finish().await;
+}
+
+#[tokio::test]
 async fn queued_fixture_uses_three_distinct_devices_and_preserves_requester_privacy() {
     let test = TestApp::new().await;
     let request = Uuid::new_v4();
@@ -845,6 +930,7 @@ async fn concurrent_polls_share_one_compute_slot_and_replays_do_not_extend_lease
                 sequence: 1,
                 website_reviews: false,
                 source_reviews: false,
+                live_tests: false,
             },
         )
         .await;
@@ -1089,6 +1175,7 @@ async fn queue_capacity_unsupported_targets_and_ineligible_devices_fail_before_a
                 sequence: 1,
                 website_reviews: false,
                 source_reviews: false,
+                live_tests: false,
             }
         )
         .await
@@ -1123,6 +1210,7 @@ async fn queue_capacity_unsupported_targets_and_ineligible_devices_fail_before_a
                 sequence: 3,
                 website_reviews: false,
                 source_reviews: false,
+                live_tests: false,
             }
         )
         .await

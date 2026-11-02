@@ -112,6 +112,7 @@ async fn poll(
             sequence,
             website_reviews,
             source_reviews: false,
+            live_tests: false,
         },
     )
     .await

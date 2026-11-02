@@ -88,6 +88,7 @@ struct StepRow {
     result: Option<DbJson<WorkResult>>,
     fixture_matches: Option<bool>,
     evidence_complete: Option<bool>,
+    live_progress: Option<DbJson<patchriot_protocol::pentests::LiveProgressView>>,
 }
 
 fn role(value: &str) -> Result<ReviewRole, ApiError> {
@@ -104,7 +105,7 @@ async fn views(
     let reviews = sqlx::query_as::<_, ReviewRow>("SELECT id, request_id, state, mode, scenario, website_context, source_context, pentest_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds FROM reviews WHERE (requester_id = $1 OR $2) AND ($3::uuid IS NULL OR id = $3) ORDER BY created_at DESC LIMIT 50")
         .bind(caller.id).bind(caller.admin).bind(id).fetch_all(pool).await?;
     let ids: Vec<_> = reviews.iter().map(|r| r.id).collect();
-    let steps = sqlx::query_as::<_, StepRow>("SELECT s.review_id, s.role, s.state, s.attempts, l.device_id, l.operator_id, l.compute_group, CASE WHEN $2 THEN s.result ELSE NULL END AS result, s.fixture_matches, s.evidence_complete FROM review_steps s LEFT JOIN work_leases l ON l.id = s.current_lease_id WHERE s.review_id = ANY($1) ORDER BY s.position")
+    let steps = sqlx::query_as::<_, StepRow>("SELECT s.review_id, s.role, s.state, s.attempts, l.device_id, l.operator_id, l.compute_group, CASE WHEN $2 THEN s.result ELSE NULL END AS result, s.fixture_matches, s.evidence_complete, l.live_progress FROM review_steps s LEFT JOIN work_leases l ON l.id = s.current_lease_id WHERE s.review_id = ANY($1) ORDER BY s.position")
         .bind(&ids).bind(id.is_some()).fetch_all(pool).await?;
     let mut result = Vec::new();
     for review in reviews {
@@ -120,6 +121,7 @@ async fn views(
                 result: step.result.as_ref().map(|r| r.0.clone()),
                 fixture_matches: step.fixture_matches,
                 evidence_complete: step.evidence_complete,
+                progress: step.live_progress.as_ref().map(|p| p.0.clone()),
             });
         }
         result.push(ReviewView {
@@ -523,12 +525,18 @@ pub async fn renew(
     if input.sequence == 0 || input.sequence > i64::MAX as u64 {
         return Err(ApiError::bad("invalid_sequence"));
     }
+    if input.progress.as_ref().is_some_and(|p| !p.valid()) {
+        return Err(ApiError::bad("invalid_live_progress"));
+    }
     let mut tx = state.pool.begin().await?;
     scheduler(&mut tx).await?;
     sweep(&mut tx).await?;
     let device = worker(&mut tx, id, &request.public_key).await?;
     let current = lease(&mut tx, input.lease_id).await?;
     active(&current, id, input.lease_id)?;
+    if input.progress.is_some() && current.mode != "pentest_agent" {
+        return Err(ApiError::bad("live_progress_not_applicable"));
+    }
     if (current.mode == "pentest_agent" && (!device.private_work_approved || !device.live_tests))
         || (current.mode == "website_agent"
             && (!device.private_work_approved || !device.website_reviews))
@@ -554,8 +562,14 @@ pub async fn renew(
     let expires = if replayed {
         current.expires_at
     } else {
-        sqlx::query_scalar("UPDATE work_leases SET expires_at = LEAST(now() + interval '60 seconds', $1), renewal_sequence = $2 WHERE id = $3 RETURNING expires_at")
-            .bind(current.deadline_at).bind(input.sequence as i64).bind(input.lease_id).fetch_one(&mut *tx).await?
+        let progress = input.progress.map(|progress| {
+            DbJson(patchriot_protocol::pentests::LiveProgressView {
+                progress,
+                received_at: now(),
+            })
+        });
+        sqlx::query_scalar("UPDATE work_leases SET expires_at = LEAST(now() + interval '60 seconds', $1), renewal_sequence = $2, live_progress = COALESCE($4, live_progress) WHERE id = $3 RETURNING expires_at")
+            .bind(current.deadline_at).bind(input.sequence as i64).bind(input.lease_id).bind(progress).fetch_one(&mut *tx).await?
     };
     tx.commit().await?;
     Ok(Json(WorkRenewed {

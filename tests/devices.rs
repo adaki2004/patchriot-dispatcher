@@ -385,7 +385,11 @@ impl TestApp {
         self.signed(
             key,
             &format!("/v1/devices/{id}/work/renew"),
-            RenewWork { lease_id, sequence },
+            RenewWork {
+                lease_id,
+                sequence,
+                progress: None,
+            },
         )
         .await
     }

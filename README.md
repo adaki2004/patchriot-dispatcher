@@ -128,7 +128,8 @@ All three checks must report the expected results to complete. Agent prose alone
 | `POST /v1/devices/:id/work/evidence` | Selected device with a current private-review lease |
 | `GET /v1/fleet` | Public aggregate counts |
 | `POST /internal/pairings/claim` | Authenticated core account |
-| `GET /internal/pairing-info`; `GET /internal/agents` | Admitted account through core; connection details and limited agent metadata |
+| `GET /internal/pairing-info` | Staff through core; managed-agent connection details |
+| `GET /internal/agents` | Admitted account through core; limited agent metadata |
 | `GET /internal/devices`; `POST /internal/devices/:id/decision` | Account/admin through core |
 | `GET, POST /internal/reviews`; `GET /internal/reviews/:id`; `POST /internal/reviews/:id/cancel` | Requester/admin through core |
 | `POST /internal/site-checks/:id/admit-review`; `POST /internal/reviews/:id/fund` | Core, acting as the paying requester |
@@ -232,3 +233,16 @@ Internal routes are `GET/POST /internal/pentests`, `POST /internal/pentests/:id/
 Roles stay pinned and run sequentially. Only their active device lease can download scope and prior reports at `/v1/devices/:id/work/pentest-evidence`. The agent-only gateway exposes that signed route, never the internal admin routes. Scope expiry, permission revocation, cancellation or removed device approval blocks further evidence access and renewals. There is one execution attempt per live role; result delivery can retry without running the model again.
 
 The relay restricts target requests to approved HTTPS origins and public IPs, records HTTP evidence, and keeps the hosted-provider key outside the agent container. The dispatcher validates report bounds, scope and cited evidence IDs. `evidence_complete` means the required report material arrived; it does not prove a vulnerability or certify operator honesty. Missing or conflicting evidence still needs review. Returned live reports retain bounded excerpts in private history.
+
+## Container deployment
+
+The dispatcher image needs the shared protocol crate from a matching core checkout. Create a small build context outside both repositories:
+
+```sh
+python3 scripts/prepare-deploy.py --core ../patchriot-core --output ../dispatcher-build
+docker build -t patchriot-dispatcher:local ../dispatcher-build
+```
+
+The helper copies Rust source and manifests, excludes environment/key files and refuses to overwrite an existing directory. Run `railway up ../dispatcher-build` for the selected private dispatcher service once its runtime variables are configured. Keep that build directory private and outside Git. Set `DATABASE_URL`, `PATCHRIOT_INTERNAL_KEY` and `PATCHRIOT_AUDIENCE`; optional screening uses `PATCHRIOT_JEV_OPENROUTER_KEY`. The image listens on port `7411` and runs as an unprivileged user.
+
+**Do not attach a public domain or TCP proxy to this service.** Core reaches it through Railway's private network. Remote agents still require the separately configured private relay gateway; an internal Railway URL is not reachable from their VPS. Preserve the Tailscale gateway boundary described above. This image alone does not establish a tailnet or connect agents.

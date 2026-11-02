@@ -1,11 +1,19 @@
 # Patchriot Dispatcher
 **Approve the scope. Coordinate the agents. Keep the evidence.**
 
-The Rust service that approves devices, queues reviews and assigns work to agents. Patchriot runs it for the hosted service; contributors install only the relay, and customers use the website.
+The Rust service that approves devices, queues reviews and assigns work to agents. Patchriot runs it for the hosted service; staff install the managed relays during the beta, and customers use the website.
 
 > **DON'T TRUST! VERIFY!** Audit the implementation and test its permission boundaries. Use authorized penetration tests against your own deployment. Private source, signed results and model confidence do not establish security.
 
 **Working today:** persistent onboarding, owned example checks, approved website snapshots and explicitly shared offline agent reviews. Internal admission can hold an agreed review until core confirms payment. Reports separate tool observations from model claims. Core provides configurable browser checkout. A separate live HTTP pilot uses exact target approval, external-provider consent and recorded requests.
+
+## Domain ownership before live testing
+
+A saved live-test scope gets a fresh DNS TXT challenge for each exact domain. The challenge belongs to the requester and immutable scope. **Refresh DNS** starts a persisted five-minute check; repeated clicks do not extend it. Six windows per request are allowed. The worker checks at most eight due records per pass, four concurrently, with a four-second lookup timeout and a thirty-second retry interval.
+
+Every domain must verify before staff can approve the scope. DNS proof and permission expire with the request after 24 hours. Scheduling, evidence access and renewal recheck the saved permission; expiry or revocation stops unfinished work. Proof never permits another account, another scope or arbitrary tools. Migration 13 also gives still-active older scopes fresh challenges; they do not bypass this gate.
+
+The verifier uses the host’s DNS resolver. Permit DNS egress and configure a trusted resolver for the deployment. It looks up the exact `_patchriot.<domain>.` TXT name, combines chunks within one record, and requires an exact token match. Missing records, DNS failures and late replies never grant access. DNS control does not prove legal authority over everything reachable through a domain; staff still review scope and authorization.
 
 ## Developer setup: run your own dispatcher
 
@@ -78,7 +86,7 @@ Install the unit in `/etc/systemd/system`, run `systemctl daemon-reload`, then `
 
 Five-minute pairing codes are claimed once. Requests carry Ed25519 proofs binding the deployment, route, timestamp and typed payload. Persistent counters reject conflicting replays; exact heartbeat retries do not extend liveness. Devices become offline after 30 seconds without a fresh heartbeat. A revoked key cannot be reapproved.
 
-Starting a signed challenge does not enroll a device. An admitted core account must claim it before approval. Deployment instructions and the agent directory require that account. The directory shares only approved devices’ OS, harness, model and heartbeat; private profiles and assignments remain separate. OS is a declaration added by new relays. Older identities and signatures remain valid. Deploy this dispatcher before installing a relay that reports OS during initialization.
+Starting a signed challenge does not enroll a device. Core permits only administrators to claim new devices or retrieve connection details. The signed-in agent directory remains available to members. The directory shares only approved devices’ OS, harness, model and heartbeat; private profiles and assignments remain separate. OS is a declaration added by new relays. Older identities and signatures remain valid. Deploy this dispatcher before installing a relay that reports OS during initialization.
 
 Approval must assess an operator and their agent's security-review, reproduction and **authorized penetration-testing capabilities** before private customer work. Pairing alone proves only control of a key.
 

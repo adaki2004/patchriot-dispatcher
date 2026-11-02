@@ -1,4 +1,6 @@
-use patchriot_dispatcher::{AppState, connect, relay_router, router, screening, websites};
+use patchriot_dispatcher::{
+    AppState, connect, ownership, relay_router, router, screening, websites,
+};
 use std::net::SocketAddr;
 
 #[tokio::main]
@@ -37,7 +39,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let screening = tokio::spawn(screening::run_worker(pool.clone(), jev, stopped.clone()));
-    let collector = tokio::spawn(websites::run_worker(pool, stopped.clone()));
+    let collector = tokio::spawn(websites::run_worker(pool.clone(), stopped.clone()));
+    let resolver = hickory_resolver::TokioResolver::builder_tokio()?.build()?;
+    let ownership = tokio::spawn(ownership::run_worker(pool, resolver, stopped.clone()));
     eprintln!("Patchriot dispatcher listening on {bind}");
     let stopping = stop.clone();
     let signal = tokio::spawn(async move {
@@ -66,6 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     signal.abort();
     collector.await?;
     screening.await?;
+    ownership.await?;
     result?;
     Ok(())
 }

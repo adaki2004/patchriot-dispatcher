@@ -1,6 +1,7 @@
 //! Device admission and liveness. Customer work is not enabled by pairing alone.
 
 mod devices;
+pub mod ownership;
 mod reviews;
 pub mod screening;
 mod sources;
@@ -186,6 +187,11 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/internal/pentests/{id}/decision",
             post(reviews::pentests::decide),
+        )
+        .route("/internal/pentests/{id}/ownership", get(ownership::get))
+        .route(
+            "/internal/pentests/{id}/ownership/refresh",
+            post(ownership::refresh),
         )
         .route(
             "/internal/pentests/{id}/review-plan",

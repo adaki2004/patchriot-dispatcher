@@ -174,7 +174,7 @@ pub(super) async fn create_review(
     scheduler(&mut tx).await?;
     sweep(&mut tx).await?;
     let existing: Option<ReviewRow> = sqlx::query_as(
-        "SELECT id, request_id, state, mode, scenario, website_context, source_context, pentest_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds, per_role_timing FROM reviews WHERE requester_id = $1 AND request_id = $2",
+        "SELECT id, request_id, state, mode, scenario, website_context, source_context, pentest_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds, per_role_timing, first_downloaded_at, report_expires_at FROM reviews WHERE requester_id = $1 AND request_id = $2",
     )
     .bind(caller.id)
     .bind(input.request_id)

@@ -179,6 +179,10 @@ pub fn router(state: AppState) -> Router {
             get(reviews::list).post(reviews::create),
         )
         .route("/internal/reviews/{id}", get(reviews::get))
+        .route(
+            "/internal/reviews/{id}/download",
+            post(reviews::retention::download),
+        )
         .route("/internal/reviews/{id}/cancel", post(reviews::cancel))
         .route("/internal/reviews/{id}/fund", post(reviews::funding::fund))
         .route(

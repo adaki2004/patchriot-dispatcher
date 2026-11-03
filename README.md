@@ -104,6 +104,8 @@ The private device list includes `reports_received`, derived from completed leas
 
 ## Review workflow
 
+**Report retention:** core sends an authenticated `POST /internal/reviews/:id/download` with `{}` when a user explicitly exports a finished report. The first requester export sets a fixed twelve-hour deadline. Replays preserve it; staff exports and ordinary reads do not start it. After expiry all private report reads omit findings and evidence, and the existing 30-second cleanup task removes results and progress even with no browser/device traffic. A small work receipt keeps execution counts, model, scope/snapshot hash and completion metadata for payment accounting. Permission, job and payment records stay intact. Delivery retries cannot restore deleted results. Migration 23 applies the clock only after an explicit export, including older saved reports. PDFs/Markdown are browser-generated and have no separate stored copy. Operators must set their database backup/recovery retention separately; application deletion does not erase historical backups.
+
 Live reports accept at most 4 MiB of compact JSON per role. The signed completion route adds a small envelope allowance; larger results are rejected before storage. Later roles can receive both preceding reports, and private detail reads can return all three. List responses contain no result bodies. Deploy core and dispatcher/gateway with these limits before upgrading relays; existing saved reports remain unchanged.
 
 ```mermaid

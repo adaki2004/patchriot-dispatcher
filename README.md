@@ -104,6 +104,8 @@ The private device list includes `reports_received`, derived from completed leas
 
 ## Review workflow
 
+Live reports accept at most 4 MiB of compact JSON per role. The signed completion route adds a small envelope allowance; larger results are rejected before storage. Later roles can receive both preceding reports, and private detail reads can return all three. List responses contain no result bodies. Deploy core and dispatcher/gateway with these limits before upgrading relays; existing saved reports remain unchanged.
+
 ```mermaid
 flowchart LR
   Q[Admitted request] --> I[Investigator]

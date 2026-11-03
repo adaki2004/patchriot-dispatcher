@@ -28,7 +28,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| "PATCHRIOT_AGENT_ATTEMPT_SECONDS must be an integer")?;
     let state = AppState::new(pool.clone(), internal_key, audience)?
         .with_agent_attempt_seconds(seconds)?
-        .with_credential_key(std::env::var("PATCHRIOT_CREDENTIAL_KEY").ok())?;
+        .with_credential_key(std::env::var("PATCHRIOT_CREDENTIAL_KEY").ok())?
+        .with_owned_test_origins(
+            std::env::var("PATCHRIOT_OWNED_TEST_ORIGINS")
+                .ok()
+                .map(|value| serde_json::from_str::<Vec<String>>(&value))
+                .transpose()
+                .map_err(
+                    |_| "PATCHRIOT_OWNED_TEST_ORIGINS must be a JSON array of exact HTTPS origins",
+                )?
+                .unwrap_or_default(),
+        )?;
     let jev = std::env::var("PATCHRIOT_JEV_OPENROUTER_KEY")
         .ok()
         .map(|key| screening::Jev::new(&key))

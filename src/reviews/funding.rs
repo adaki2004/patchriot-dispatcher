@@ -99,7 +99,7 @@ pub(crate) async fn fund(
         {
             return Err(ApiError::conflict("selected_device_unavailable"));
         }
-        let retained: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pentests WHERE id=$1 AND requester_id=$2 AND state='approved' AND ownership_verified_at IS NOT NULL AND expires_at > now() + make_interval(secs => $3))")
+        let retained: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pentests WHERE id=$1 AND requester_id=$2 AND state='approved' AND (ownership_verified_at IS NOT NULL OR staff_authorized_at IS NOT NULL) AND expires_at > now() + make_interval(secs => $3))")
             .bind(context.pentest_id).bind(caller.id).bind(review_seconds as f64).fetch_one(&mut *tx).await?;
         if !retained {
             return Err(ApiError::conflict("live_scope_not_ready"));

@@ -238,14 +238,16 @@ async fn check_one(
     let mut tx = pool.begin().await?;
     // Same lock order as refresh/approval. A late DNS response cannot resurrect
     // a revoked scope, an expired check, or a newer verification window.
-    let active: Option<Uuid> = sqlx::query_scalar("SELECT id FROM pentests WHERE id=$1 AND state IN ('pending_approval','approved') AND expires_at>now() FOR UPDATE")
+    let active: Option<Uuid> = sqlx::query_scalar("SELECT id FROM pentests WHERE id=$1 AND state IN ('pending_approval','approved') AND staff_authorized_at IS NULL AND expires_at>now() FOR UPDATE")
         .bind(c.pentest_id).fetch_optional(&mut *tx).await?;
     if active.is_some() {
         sqlx::query("UPDATE domain_challenges SET state=$3,error=$4,last_checked_at=now(),verified_at=CASE WHEN $3='verified' THEN now() ELSE NULL END WHERE pentest_id=$1 AND domain=$2 AND state<>'verified' AND checking_until=$5 AND checking_until>now() AND expires_at>now()")
             .bind(c.pentest_id).bind(&c.domain).bind(state).bind(error).bind(c.checking_until).execute(&mut *tx).await?;
         // Approve only after every exact origin is verified. Payment, consent and
         // worker eligibility remain separate checks; this creates no work.
-        sqlx::query("UPDATE pentests p SET ownership_verified_at=COALESCE(ownership_verified_at,now()),state='approved',decision_note=CASE WHEN state='pending_approval' THEN 'Domain control verified automatically.' ELSE decision_note END WHERE id=$1 AND (SELECT count(*) FROM domain_challenges c WHERE c.pentest_id=p.id)=jsonb_array_length(p.scope->'origins') AND NOT EXISTS(SELECT 1 FROM domain_challenges c WHERE c.pentest_id=p.id AND (c.state<>'verified' OR c.expires_at<=now()))")
+        sqlx::query("UPDATE pentests p SET ownership_verified_at=COALESCE(ownership_verified_at,now()),state='approved',expires_at=LEAST(expires_at,now()+interval '24 hours'),decision_note=CASE WHEN state='pending_approval' THEN 'Domain control verified automatically.' ELSE decision_note END WHERE id=$1 AND (SELECT count(*) FROM domain_challenges c WHERE c.pentest_id=p.id)=jsonb_array_length(p.scope->'origins') AND NOT EXISTS(SELECT 1 FROM domain_challenges c WHERE c.pentest_id=p.id AND (c.state<>'verified' OR c.expires_at<=now()))")
+            .bind(c.pentest_id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE domain_challenges c SET expires_at=LEAST(c.expires_at,p.expires_at) FROM pentests p WHERE c.pentest_id=p.id AND p.id=$1 AND p.ownership_verified_at IS NOT NULL")
             .bind(c.pentest_id).execute(&mut *tx).await?;
     }
     tx.commit().await

@@ -31,6 +31,7 @@ pub struct AppState {
     pub audience: Arc<str>,
     agent_attempt_seconds: u64,
     credential_vault: Option<Arc<credentials::Vault>>,
+    owned_test_origins: Arc<[String]>,
 }
 
 impl AppState {
@@ -58,6 +59,7 @@ impl AppState {
             audience: audience.into(),
             agent_attempt_seconds: patchriot_protocol::DEFAULT_AGENT_ATTEMPT_SECONDS,
             credential_vault: None,
+            owned_test_origins: Arc::from([]),
         })
     }
 
@@ -76,6 +78,24 @@ impl AppState {
         self.credential_vault = key
             .map(|key| credentials::Vault::from_hex(&key).map(Arc::new))
             .transpose()?;
+        Ok(self)
+    }
+
+    /// Off by default. Staff must still grant each exact request explicitly.
+    /// Removing this configuration disables new grants; revoke existing grants
+    /// through the normal scope decision endpoint to stop their active work.
+    pub fn with_owned_test_origins(mut self, origins: Vec<String>) -> Result<Self, &'static str> {
+        if origins.len() > 16 {
+            return Err("too many owned test origins");
+        }
+        for (index, origin) in origins.iter().enumerate() {
+            let parsed = patchriot_protocol::pentests::public_url(origin)?;
+            if parsed.origin().ascii_serialization() != *origin || origins[..index].contains(origin)
+            {
+                return Err("owned test origins must be distinct, exact HTTPS origins");
+            }
+        }
+        self.owned_test_origins = origins.into();
         Ok(self)
     }
 
@@ -204,6 +224,10 @@ pub fn router(state: AppState) -> Router {
             get(reviews::pentests::list).post(reviews::pentests::create),
         )
         .route("/internal/pentest-tools", get(reviews::pentests::tools))
+        .route(
+            "/internal/pentests/{id}/authorize-owned-test",
+            post(reviews::pentests::authorize_owned_test),
+        )
         .route(
             "/internal/pentests/{id}/decision",
             post(reviews::pentests::decide),

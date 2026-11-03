@@ -4,6 +4,7 @@ mod credentials;
 mod devices;
 pub use credentials::run_cleanup;
 pub mod ownership;
+pub mod report_checks;
 mod reviews;
 pub mod screening;
 mod sources;
@@ -32,6 +33,7 @@ pub struct AppState {
     agent_attempt_seconds: u64,
     credential_vault: Option<Arc<credentials::Vault>>,
     owned_test_origins: Arc<[String]>,
+    near_check: Option<report_checks::NearCheck>,
 }
 
 impl AppState {
@@ -60,6 +62,7 @@ impl AppState {
             agent_attempt_seconds: patchriot_protocol::DEFAULT_AGENT_ATTEMPT_SECONDS,
             credential_vault: None,
             owned_test_origins: Arc::from([]),
+            near_check: None,
         })
     }
 
@@ -101,6 +104,15 @@ impl AppState {
 
     fn agent_review_seconds(&self) -> u64 {
         patchriot_protocol::agent_review_seconds(self.agent_attempt_seconds)
+    }
+
+    pub fn with_near_ai_key(mut self, key: Option<String>) -> Result<Self, &'static str> {
+        self.near_check = key.map(report_checks::NearCheck::new).transpose()?;
+        Ok(self)
+    }
+
+    pub fn report_checker(&self) -> Option<report_checks::NearCheck> {
+        self.near_check.clone()
     }
 }
 
@@ -179,6 +191,10 @@ pub fn router(state: AppState) -> Router {
             get(reviews::list).post(reviews::create),
         )
         .route("/internal/reviews/{id}", get(reviews::get))
+        .route(
+            "/internal/reviews/{id}/consistency-check",
+            get(report_checks::get).post(report_checks::request),
+        )
         .route(
             "/internal/reviews/{id}/download",
             post(reviews::retention::download),

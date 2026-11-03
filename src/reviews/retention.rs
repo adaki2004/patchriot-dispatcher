@@ -4,6 +4,8 @@ use super::*;
 use patchriot_protocol::reports::WorkReceipt;
 
 pub(super) async fn purge(tx: &mut Tx<'_>) -> Result<(), ApiError> {
+    sqlx::query("UPDATE report_consistency_checks c SET state='deleted',input=NULL,result=NULL,claim_id=NULL,claim_until=NULL,error_code=NULL FROM reviews r WHERE r.id=c.review_id AND r.report_expires_at<=now() AND c.state<>'deleted'")
+        .execute(&mut **tx).await?;
     sqlx::query("UPDATE review_steps s SET result=NULL FROM reviews r WHERE r.id=s.review_id AND r.report_expires_at<=now() AND r.report_purged_at IS NULL AND s.result IS NOT NULL")
         .execute(&mut **tx).await?;
     sqlx::query("UPDATE work_leases l SET live_progress=NULL FROM review_steps s,reviews r WHERE l.step_id=s.id AND s.review_id=r.id AND r.report_expires_at<=now() AND r.report_purged_at IS NULL AND l.live_progress IS NOT NULL")

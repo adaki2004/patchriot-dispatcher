@@ -38,6 +38,7 @@ Keep `patchriot-core` beside this repository for the Apache-2.0 protocol crate. 
 | `PATCHRIOT_RELAY_BIND` | Optional agent-only listener for Tailscale Serve, e.g. `127.0.0.1:7412`; requires both listeners on loopback |
 | `PATCHRIOT_AGENT_ATTEMPT_SECONDS` | Optional agent limit: `600` by default, at most `3600` |
 | `PATCHRIOT_JEV_OPENROUTER_KEY` | Optional server-only OpenRouter key for consented request screening |
+| `PATCHRIOT_NEAR_AI_KEY` | Optional server-only NEAR AI key for requester-approved report consistency checks |
 
 ```sh
 cargo run --locked
@@ -74,6 +75,16 @@ Leaving `PATCHRIOT_RELAY_BIND` unset preserves the existing local/internal setup
 ## What coordinates the agents?
 
 **Rust schedules the work.** There is no lead Hermes agent in the dispatcher. Code checks permissions, records the agreed team and assigns investigator, reproducer and challenger roles. Workers use Hermes through the relay’s isolated adapter: local models for offline modes, or the explicitly configured hosted provider for live HTTP tests.
+
+### Optional NEAR AI report check
+
+With `PATCHRIOT_NEAR_AI_KEY` configured, the requester can ask for one advisory check of a finished live-test report. `POST /internal/reviews/:id/consistency-check` requires `{"accepts_near_ai":true}` and the requester's identity; staff cannot consent for someone else. `GET` returns its status and receipt to the requester or authorized staff. Migration 25 stores one durable attempt per report. Concurrent clicks reuse that attempt; interrupted or unverifiable completions are never purchased again automatically.
+
+The checker sends bounded finding excerpts and request metadata to `Qwen/Qwen3.8-27B-abliterated`. Raw HTTP captures, query values and stored login credentials are excluded; excerpts can still contain sensitive details. Advice can flag possible duplicates or claims needing review. It cannot alter original findings, approve work, access a target or move funds. Existing deterministic grouping remains the report's source of counts.
+
+The pinned [NEAR AI Rust SDK](https://docs.near.ai/cloud/inference-sdk/rust) checks fresh gateway/model attestation, requires UpToDate TCB status and GPU evidence, then verifies a provider-TEE signature over the exact request and response bytes. Gateway-only signatures, changed bytes and malformed advice are rejected. The downloadable receipt includes those bytes, hashes, signature and observed measurements. It does not include a portable hardware certificate chain or an audited source allowlist, identify a physical serving machine, attest the Kali agents or establish that findings are true. This integration uses verified HTTPS, not end-to-end encryption. See [response signatures and their limits](https://docs.near.ai/cloud/verification/cloud-api/response-signatures).
+
+Checks run one at a time with a three-minute timeout and 2,048 output tokens. The provider key stays in dispatcher, never the agent gateway, browser or relay. The receipt follows the report's fixed 12-hour deletion clock, including queued inputs and late responses. Deploy migration 25 before the matching core UI; no relay update is required for this feature.
 
 Live testing uses one discovery pass followed by targeted reproduction and review. With relay adapter 9, only Scout must run the requested ARTEX engine. Later roles still need their own request evidence, a usable assessment, confirmed cleanup and any required authenticated/anonymous access checks. The dispatcher takes the role from its saved assignment. An incomplete Scout leaves the overall review incomplete; a failed engine run from an older follow-up worker also stays incomplete. Deploy this dispatcher before upgrading the relay image. Existing scopes and saved reports keep their format.
 

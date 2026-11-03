@@ -1,14 +1,14 @@
 # Use scripts/prepare-deploy.py to create the two-repository build context.
 ARG PATCHRIOT_IMAGE=service
 FROM rust:1.94.1-alpine@sha256:77237dd363a0b127bb5ef532c2d64c0deb380b738e43a9c4bdac73398d6d0a08 AS rust
-RUN apk add --no-cache musl-dev gcc
+RUN apk add --no-cache musl-dev gcc openssl-dev openssl-libs-static pkgconf
 WORKDIR /source
 COPY patchriot-core ./patchriot-core
 WORKDIR /source/patchriot-dispatcher
 COPY patchriot-dispatcher/Cargo.toml patchriot-dispatcher/Cargo.lock patchriot-dispatcher/rust-toolchain.toml patchriot-dispatcher/build.rs ./
 COPY patchriot-dispatcher/src ./src
 COPY patchriot-dispatcher/migrations ./migrations
-RUN cargo build --locked --release --bins
+RUN OPENSSL_STATIC=1 cargo build --locked --release --bins
 
 FROM alpine:3.23@sha256:ff7f0c727dd796aa36787bfcd9a64bf35a6ce72a73451b3359fde849b6703d63 AS runtime
 RUN apk add --no-cache ca-certificates

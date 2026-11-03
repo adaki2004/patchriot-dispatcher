@@ -38,7 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     |_| "PATCHRIOT_OWNED_TEST_ORIGINS must be a JSON array of exact HTTPS origins",
                 )?
                 .unwrap_or_default(),
-        )?;
+        )?
+        .with_near_ai_key(std::env::var("PATCHRIOT_NEAR_AI_KEY").ok())?;
     let jev = std::env::var("PATCHRIOT_JEV_OPENROUTER_KEY")
         .ok()
         .map(|key| screening::Jev::new(&key))
@@ -54,6 +55,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         stopped.clone(),
     ));
     let screening = tokio::spawn(screening::run_worker(pool.clone(), jev, stopped.clone()));
+    let report_checks = tokio::spawn(patchriot_dispatcher::report_checks::run_worker(
+        pool.clone(),
+        state.report_checker(),
+        stopped.clone(),
+    ));
     let collector = tokio::spawn(websites::run_worker(pool.clone(), stopped.clone()));
     let resolver = hickory_resolver::TokioResolver::builder_tokio()?.build()?;
     let ownership = tokio::spawn(ownership::run_worker(pool, resolver, stopped.clone()));
@@ -85,6 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     signal.abort();
     collector.await?;
     screening.await?;
+    report_checks.await?;
     ownership.await?;
     cleanup.await?;
     result?;

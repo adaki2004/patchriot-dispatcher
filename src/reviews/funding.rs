@@ -82,11 +82,16 @@ pub(crate) async fn fund(
             return Err(ApiError::conflict("live_scope_not_ready"));
         }
         let ids: Vec<_> = context.reviewers.iter().map(|r| r.device_id).collect();
-        let ready: Vec<_> = websites::eligible(&mut tx, Some(&ids), ReviewMode::PentestAgent)
-            .await?
-            .into_iter()
-            .map(websites::Candidate::disclosure)
-            .collect();
+        let ready: Vec<_> = websites::eligible_with_tools(
+            &mut tx,
+            Some(&ids),
+            ReviewMode::PentestAgent,
+            &context.scope.tools,
+        )
+        .await?
+        .into_iter()
+        .map(websites::Candidate::disclosure)
+        .collect();
         if ids.len() != 3
             || ready.len() != 3
             || context.reviewers.iter().any(|r| !ready.contains(r))

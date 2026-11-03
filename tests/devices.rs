@@ -308,6 +308,7 @@ impl TestApp {
                     website_reviews: false,
                     source_reviews: false,
                     live_tests: false,
+                    live_tools: vec![],
                 },
             )
             .await;
@@ -774,6 +775,7 @@ async fn standalone_gateway_preserves_signed_pairing_approval_and_work_delivery(
                 website_reviews: false,
                 source_reviews: false,
                 live_tests: false,
+                live_tools: vec![],
             },
         )
         .await;
@@ -801,6 +803,7 @@ async fn standalone_gateway_preserves_signed_pairing_approval_and_work_delivery(
                 website_reviews: false,
                 source_reviews: false,
                 live_tests: false,
+                live_tools: vec![],
             },
         )
         .await;
@@ -930,6 +933,7 @@ async fn concurrent_polls_share_one_compute_slot_and_replays_do_not_extend_lease
                 website_reviews: false,
                 source_reviews: false,
                 live_tests: false,
+                live_tools: vec![],
             },
         )
         .await;
@@ -1175,6 +1179,7 @@ async fn queue_capacity_unsupported_targets_and_ineligible_devices_fail_before_a
                 website_reviews: false,
                 source_reviews: false,
                 live_tests: false,
+                live_tools: vec![],
             }
         )
         .await
@@ -1210,6 +1215,7 @@ async fn queue_capacity_unsupported_targets_and_ineligible_devices_fail_before_a
                 website_reviews: false,
                 source_reviews: false,
                 live_tests: false,
+                live_tools: vec![],
             }
         )
         .await

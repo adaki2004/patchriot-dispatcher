@@ -209,6 +209,10 @@ pub fn router(state: AppState) -> Router {
             "/internal/pentests/{id}/review",
             post(reviews::pentests::start),
         )
+        .route(
+            "/internal/pentests/{id}/admit-review",
+            post(reviews::pentests::admit),
+        )
         .route("/internal/sources/{id}", get(sources::detail))
         .route("/internal/sources/{id}/decision", post(sources::decide))
         .route("/internal/sources/{id}/delete", post(sources::delete))

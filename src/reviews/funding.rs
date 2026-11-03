@@ -74,7 +74,31 @@ pub(crate) async fn fund(
     }
     let review_seconds =
         patchriot_protocol::agent_review_seconds(current.agent_attempt_seconds as u64);
-    if let Some(context) = current.source_context {
+    if let Some(saved) = current.pentest_context {
+        // Payment never extends domain permission or silently substitutes a
+        // different operator. Re-check the scope when funds actually arrive.
+        let context = pentests::context(&mut tx, id).await?;
+        if context.scope_sha256 != saved.scope_sha256 || context.reviewers != saved.reviewers {
+            return Err(ApiError::conflict("live_scope_not_ready"));
+        }
+        let ids: Vec<_> = context.reviewers.iter().map(|r| r.device_id).collect();
+        let ready: Vec<_> = websites::eligible(&mut tx, Some(&ids), ReviewMode::PentestAgent)
+            .await?
+            .into_iter()
+            .map(websites::Candidate::disclosure)
+            .collect();
+        if ids.len() != 3
+            || ready.len() != 3
+            || context.reviewers.iter().any(|r| !ready.contains(r))
+        {
+            return Err(ApiError::conflict("selected_device_unavailable"));
+        }
+        let retained: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pentests WHERE id=$1 AND requester_id=$2 AND state='approved' AND ownership_verified_at IS NOT NULL AND expires_at > now() + make_interval(secs => $3))")
+            .bind(context.pentest_id).bind(caller.id).bind(review_seconds as f64).fetch_one(&mut *tx).await?;
+        if !retained {
+            return Err(ApiError::conflict("live_scope_not_ready"));
+        }
+    } else if let Some(context) = current.source_context {
         let ids: Vec<_> = context.reviewers.iter().map(|r| r.device_id).collect();
         let ready = sources::candidates(&mut tx, Some(&ids)).await?;
         if ids.len() != 3

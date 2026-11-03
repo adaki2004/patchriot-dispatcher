@@ -226,6 +226,8 @@ Raw bundles expire after seven days. Owner deletion cancels unfinished reviews a
 
 ## Live website pilot
 
+Core can reserve a live assessment through `POST /internal/pentests/:id/admit-review`. It stays `awaiting_payment` until core confirms the matching settlement. Admission requires domain proof, scope approval, the named team and separate provider consent. Funding rechecks permission and team availability; it cannot extend an expired scope or restart cancelled work. Coupons use the existing idempotent start after core reserves the code.
+
 `pentest_agent` / `live_http_v1` is separate from snapshot collection. Migration `0012` stores an immutable origin/method/objective scope, owner permission note, admin decision and 24-hour expiry. The owner selects three private-approved devices with the signed `live_tests` opt-in and separately consents to operator and **abliteration.ai** access. Existing device polls omit that flag and remain compatible.
 
 Internal routes are `GET/POST /internal/pentests`, `POST /internal/pentests/:id/decision`, `GET /internal/pentests/:id/review-plan` and `POST /internal/pentests/:id/review`. Core only exposes live starts in `pilot` access mode; this does not bypass paid/coupon admission for other work. Operator earnings and live-mode checkout are not enabled.

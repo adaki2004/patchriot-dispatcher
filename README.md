@@ -1,11 +1,19 @@
 # Patchriot Dispatcher
 **Approve the scope. Coordinate the agents. Keep the evidence.**
 
-The Rust service that approves devices, queues reviews and assigns work to agents. Patchriot runs it for the hosted service; contributors install only the relay, and customers use the website.
+The Rust service that approves devices, queues reviews and assigns work to agents. Patchriot runs it for the hosted service; staff install the managed relays during the beta, and customers use the website.
 
 > **DON'T TRUST! VERIFY!** Audit the implementation and test its permission boundaries. Use authorized penetration tests against your own deployment. Private source, signed results and model confidence do not establish security.
 
 **Working today:** persistent onboarding, owned example checks, approved website snapshots and explicitly shared offline agent reviews. Internal admission can hold an agreed review until core confirms payment. Reports separate tool observations from model claims. Core provides configurable browser checkout. A separate live HTTP pilot uses exact target approval, external-provider consent and recorded requests.
+
+## Domain ownership before live testing
+
+A saved live-test scope gets a fresh DNS TXT challenge for each exact domain. The challenge belongs to the requester and immutable scope. **Refresh DNS** starts a persisted five-minute check; repeated clicks do not extend it. Six windows per request are allowed. The worker checks at most eight due records per pass, four concurrently, with a four-second lookup timeout and a thirty-second retry interval.
+
+Every domain must verify before staff can approve the scope. DNS proof and permission expire with the request after 24 hours. Scheduling, evidence access and renewal recheck the saved permission; expiry or revocation stops unfinished work. Proof never permits another account, another scope or arbitrary tools. Migration 13 also gives still-active older scopes fresh challenges; they do not bypass this gate.
+
+The verifier uses the host’s DNS resolver. Permit DNS egress and configure a trusted resolver for the deployment. It looks up the exact `_patchriot.<domain>.` TXT name, combines chunks within one record, and requires an exact token match. Missing records, DNS failures and late replies never grant access. DNS control does not prove legal authority over everything reachable through a domain; staff still review scope and authorization.
 
 ## Developer setup: run your own dispatcher
 
@@ -78,7 +86,7 @@ Install the unit in `/etc/systemd/system`, run `systemctl daemon-reload`, then `
 
 Five-minute pairing codes are claimed once. Requests carry Ed25519 proofs binding the deployment, route, timestamp and typed payload. Persistent counters reject conflicting replays; exact heartbeat retries do not extend liveness. Devices become offline after 30 seconds without a fresh heartbeat. A revoked key cannot be reapproved.
 
-Starting a signed challenge does not enroll a device. An admitted core account must claim it before approval. Deployment instructions and the agent directory require that account. The directory shares only approved devices’ OS, harness, model and heartbeat; private profiles and assignments remain separate. OS is a declaration added by new relays. Older identities and signatures remain valid. Deploy this dispatcher before installing a relay that reports OS during initialization.
+Starting a signed challenge does not enroll a device. Core permits only administrators to claim new devices or retrieve connection details. The signed-in agent directory remains available to members. The directory shares only approved devices’ OS, harness, model and heartbeat; private profiles and assignments remain separate. OS is a declaration added by new relays. Older identities and signatures remain valid. Deploy this dispatcher before installing a relay that reports OS during initialization.
 
 Approval must assess an operator and their agent's security-review, reproduction and **authorized penetration-testing capabilities** before private customer work. Pairing alone proves only control of a key.
 
@@ -120,7 +128,8 @@ All three checks must report the expected results to complete. Agent prose alone
 | `POST /v1/devices/:id/work/evidence` | Selected device with a current private-review lease |
 | `GET /v1/fleet` | Public aggregate counts |
 | `POST /internal/pairings/claim` | Authenticated core account |
-| `GET /internal/pairing-info`; `GET /internal/agents` | Admitted account through core; connection details and limited agent metadata |
+| `GET /internal/pairing-info` | Staff through core; managed-agent connection details |
+| `GET /internal/agents` | Admitted account through core; limited agent metadata |
 | `GET /internal/devices`; `POST /internal/devices/:id/decision` | Account/admin through core |
 | `GET, POST /internal/reviews`; `GET /internal/reviews/:id`; `POST /internal/reviews/:id/cancel` | Requester/admin through core |
 | `POST /internal/site-checks/:id/admit-review`; `POST /internal/reviews/:id/fund` | Core, acting as the paying requester |
@@ -224,3 +233,32 @@ Internal routes are `GET/POST /internal/pentests`, `POST /internal/pentests/:id/
 Roles stay pinned and run sequentially. Only their active device lease can download scope and prior reports at `/v1/devices/:id/work/pentest-evidence`. The agent-only gateway exposes that signed route, never the internal admin routes. Scope expiry, permission revocation, cancellation or removed device approval blocks further evidence access and renewals. There is one execution attempt per live role; result delivery can retry without running the model again.
 
 The relay restricts target requests to approved HTTPS origins and public IPs, records HTTP evidence, and keeps the hosted-provider key outside the agent container. The dispatcher validates report bounds, scope and cited evidence IDs. `evidence_complete` means the required report material arrived; it does not prove a vulnerability or certify operator honesty. Missing or conflicting evidence still needs review. Returned live reports retain bounded excerpts in private history.
+
+## Container deployment
+
+The dispatcher image needs the shared protocol crate from a matching core checkout. Create a small build context outside both repositories:
+
+```sh
+python3 scripts/prepare-deploy.py --core ../patchriot-core --output ../dispatcher-build
+docker build -t patchriot-dispatcher:local ../dispatcher-build
+```
+
+The helper copies Rust source and manifests, excludes environment/key files and refuses to overwrite an existing directory. Run `railway up ../dispatcher-build` for the selected private dispatcher service once its runtime variables are configured. Keep that build directory private and outside Git. Set `DATABASE_URL`, `PATCHRIOT_INTERNAL_KEY` and `PATCHRIOT_AUDIENCE`; optional screening uses `PATCHRIOT_JEV_OPENROUTER_KEY`. The image listens on port `7411` and runs as an unprivileged user.
+
+**Do not attach a public domain or TCP proxy to this service.** Core reaches it through Railway's private network. Remote agents still require the separately configured private relay gateway; an internal Railway URL is not reachable from their VPS. Preserve the Tailscale gateway boundary described above. This image alone does not establish a tailnet or connect agents.
+
+### Separate hosted agent gateway
+
+For separate Railway services, run the companion **mesh image** beside the main dispatcher. It shares the dispatcher database and audience, uses the same signed device handlers, and has no internal service key or admin routes. Only the main dispatcher runs DNS verification, screening and collection workers. Existing same-host Tailscale setups can continue using the two-listener configuration above.
+
+```sh
+docker build --build-arg PATCHRIOT_IMAGE=mesh -t patchriot-gateway:local ../dispatcher-build
+```
+
+On Railway, select this image with the build variable `PATCHRIOT_IMAGE=mesh`. Set `DATABASE_URL` to the dispatcher's private database and use the same `PATCHRIOT_AUDIENCE` and `PATCHRIOT_AGENT_ATTEMPT_SECONDS`. Set `TS_AUTHKEY` to a private, tagged Tailscale key approved for `tag:patchriot-dispatcher`; enable tailnet HTTPS and apply the grants above. Do not give this service core's internal key, model credentials or treasury keys.
+
+Mount a dedicated persistent volume at `/var/lib/tailscale`. [Railway mounts volumes as root](https://docs.railway.com/volumes#permissions); set `RAILWAY_RUN_UID=0` on this gateway service only. The entrypoint prepares that exact directory as `65534:65534`, mode `0700`, then drops to UID/GID 65534, clears groups and all Linux capabilities, and enables `no_new_privs` before starting either service. It rejects an alternative path or symlink during root initialization and does not change existing files recursively. Other platforms can retain the image's default nonroot user with a correctly owned volume. Keep machine state across releases so the tailnet address stays stable. `/tmp` must be writable for the local socket. The image pins Tailscale 1.104.4 and uses userspace networking, without `/dev/net/tun` or privileged mode.
+
+The gateway listens only on `127.0.0.1:7412`; `deploy/serve.json` shares it over private Tailscale HTTPS on port 443 with Funnel disabled. No public Railway domain or TCP proxy belongs on this service. The launcher stops both processes if either exits, and its container health check requires both local services. Set core's `PATCHRIOT_RELAY_ORIGIN` to the resulting tailnet HTTPS address, then run the relay's `mesh-check` from each admitted agent host before pairing. Network admission still does not approve a device or grant access to customer work.
+
+Check a built gateway locally with `PATCHRIOT_GATEWAY_TEST_IMAGE=patchriot-gateway:local python3 -m unittest discover -s scripts -p 'test_*.py'`. The image checks use disposable volumes and no network credentials to verify privilege removal, persistence and rejection of redirected state paths. They are skipped when the image variable is unset; tailnet enrollment still needs a separate deployment check.

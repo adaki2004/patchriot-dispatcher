@@ -3,7 +3,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use http_body_util::BodyExt;
-use patchriot_dispatcher::{AppState, relay_router};
+use patchriot_dispatcher::{AppState, relay_router, router};
 use tower::ServiceExt;
 
 fn app() -> axum::Router {
@@ -81,4 +81,28 @@ async fn gateway_health_is_distinct_and_pairing_still_requires_a_signed_body() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn standalone_gateway_state_cannot_authorize_internal_calls_even_on_the_full_router() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://fixture:fixture@127.0.0.1:1/unused")
+        .unwrap();
+    let state = AppState::relay_only(pool, "mesh-test".into()).unwrap();
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/internal/devices")
+                .header(
+                    "authorization",
+                    "Bearer fixture-internal-service-key-32-bytes",
+                )
+                .header("x-patchriot-account", uuid::Uuid::new_v4().to_string())
+                .header("x-patchriot-role", "admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }

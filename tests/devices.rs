@@ -385,7 +385,11 @@ impl TestApp {
         self.signed(
             key,
             &format!("/v1/devices/{id}/work/renew"),
-            RenewWork { lease_id, sequence },
+            RenewWork {
+                lease_id,
+                sequence,
+                progress: None,
+            },
         )
         .await
     }
@@ -740,15 +744,10 @@ fn fixture_result() -> FixtureResult {
 }
 
 #[tokio::test]
-async fn relay_gateway_preserves_signed_pairing_approval_and_work_delivery() {
+async fn standalone_gateway_preserves_signed_pairing_approval_and_work_delivery() {
     let mut test = TestApp::new().await;
     test.relay = Some(relay_router(
-        AppState::new(
-            test.pool.clone(),
-            test.internal_key.clone(),
-            "test-deployment".into(),
-        )
-        .unwrap(),
+        AppState::relay_only(test.pool.clone(), "test-deployment".into()).unwrap(),
     ));
     let review = test.review(Uuid::new_v4()).await;
     let key = DeviceKey::from_bytes(&[79; 32]);

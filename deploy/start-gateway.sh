@@ -46,6 +46,8 @@ trap cleanup EXIT
 trap 'exit 0' INT TERM
 (
   unset TS_AUTHKEY PATCHRIOT_INTERNAL_KEY PATCHRIOT_JEV_OPENROUTER_KEY
+  # Mesh deployments must stay private even if a public-gateway bind was copied.
+  export PATCHRIOT_GATEWAY_BIND=127.0.0.1:7412
   exec patchriot-relay-gateway
 ) &
 gateway_pid=$!

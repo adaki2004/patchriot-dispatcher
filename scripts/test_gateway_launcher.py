@@ -42,6 +42,7 @@ raise SystemExit(1)
             'TS_AUTHKEY': 'synthetic-network-credential',
             'PATCHRIOT_INTERNAL_KEY': 'synthetic-unused-internal-credential',
             'PATCHRIOT_JEV_OPENROUTER_KEY': 'synthetic-unused-model-credential',
+            'PATCHRIOT_GATEWAY_BIND': '[::]:7412',
             'TS_EXTRA_ARGS': '--ssh --advertise-exit-node', 'TS_USERSPACE': 'false',
             'TS_DEST_IP': '203.0.113.1', 'TS_SERVE_CONFIG': '/untrusted/config',
         }
@@ -80,6 +81,7 @@ raise SystemExit(1)
         mesh = json.loads((self.folder / 'containerboot.json').read_text())
         self.assertIn('DATABASE_URL', app)
         self.assertNotIn('TS_AUTHKEY', app)
+        self.assertEqual(app['PATCHRIOT_GATEWAY_BIND'], '127.0.0.1:7412')
         self.assertIn('TS_AUTHKEY', mesh)
         self.assertNotIn('DATABASE_URL', mesh)
         for env in (app, mesh):

@@ -229,6 +229,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/internal/pentest-tools", get(reviews::pentests::tools))
         .route(
+            "/internal/pentests/{id}/credentials",
+            post(reviews::pentests::set_credentials),
+        )
+        .route(
             "/internal/pentests/{id}/authorize-owned-test",
             post(reviews::pentests::authorize_owned_test),
         )

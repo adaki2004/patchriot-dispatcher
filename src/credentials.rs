@@ -82,7 +82,7 @@ pub(crate) async fn save(
 ) -> Result<(), ApiError> {
     let vault = state.credential_vault.as_ref().ok_or_else(unavailable)?;
     let bytes = vault.seal(&binding(id, account, hash), input)?;
-    sqlx::query("INSERT INTO pentest_credentials(pentest_id,ciphertext,expires_at) SELECT id,$2,LEAST(expires_at,now()+interval '24 hours') FROM pentests WHERE id=$1")
+    sqlx::query("INSERT INTO pentest_credentials(pentest_id,ciphertext,expires_at) SELECT id,$2,LEAST(expires_at,now()+interval '24 hours') FROM pentests WHERE id=$1 ON CONFLICT(pentest_id) DO UPDATE SET ciphertext=EXCLUDED.ciphertext,expires_at=EXCLUDED.expires_at")
         .bind(id).bind(bytes).execute(&mut **tx).await?;
     Ok(())
 }

@@ -1,6 +1,8 @@
 //! Device admission and liveness. Customer work is not enabled by pairing alone.
 
+mod credentials;
 mod devices;
+pub use credentials::run_cleanup;
 pub mod ownership;
 mod reviews;
 pub mod screening;
@@ -28,6 +30,7 @@ pub struct AppState {
     internal_hash: Option<Arc<[u8; 32]>>,
     pub audience: Arc<str>,
     agent_attempt_seconds: u64,
+    credential_vault: Option<Arc<credentials::Vault>>,
 }
 
 impl AppState {
@@ -54,6 +57,7 @@ impl AppState {
             internal_hash: None,
             audience: audience.into(),
             agent_attempt_seconds: patchriot_protocol::DEFAULT_AGENT_ATTEMPT_SECONDS,
+            credential_vault: None,
         })
     }
 
@@ -65,6 +69,13 @@ impl AppState {
             return Err("agent attempt limit must be 600..1800 seconds");
         }
         self.agent_attempt_seconds = seconds;
+        Ok(self)
+    }
+
+    pub fn with_credential_key(mut self, key: Option<String>) -> Result<Self, &'static str> {
+        self.credential_vault = key
+            .map(|key| credentials::Vault::from_hex(&key).map(Arc::new))
+            .transpose()?;
         Ok(self)
     }
 

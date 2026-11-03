@@ -30,6 +30,7 @@ pub(crate) async fn scheduler(tx: &mut Tx<'_>) -> Result<(), ApiError> {
 
 pub(crate) async fn sweep(tx: &mut Tx<'_>) -> Result<(), ApiError> {
     crate::sources::sweep(tx).await?;
+    sqlx::query("UPDATE reviews r SET state='failed' WHERE r.mode='pentest_agent' AND r.state IN ('awaiting_payment','queued','running') AND r.pentest_context->'scope'->>'authentication' IS NOT NULL AND NOT EXISTS(SELECT 1 FROM pentest_credentials c WHERE c.pentest_id=r.pentest_id AND c.expires_at>now())").execute(&mut **tx).await?;
     sqlx::query("UPDATE reviews r SET state = 'failed' WHERE r.mode = 'pentest_agent' AND r.state IN ('queued','running') AND (EXISTS (SELECT 1 FROM review_steps s JOIN devices d ON d.id = s.assigned_device_id WHERE s.review_id = r.id AND (d.approval <> 'approved' OR NOT d.private_work_approved)) OR NOT EXISTS (SELECT 1 FROM pentests p WHERE p.id = r.pentest_id AND p.state = 'approved' AND p.ownership_verified_at IS NOT NULL AND p.expires_at > now()))")
         .execute(&mut **tx).await?;
     sqlx::query("UPDATE reviews r SET state = 'failed' WHERE r.mode = 'source_agent' AND r.state IN ('awaiting_payment','queued','running') AND (EXISTS (SELECT 1 FROM review_steps s JOIN devices d ON d.id = s.assigned_device_id WHERE s.review_id = r.id AND (d.approval <> 'approved' OR NOT d.private_work_approved)) OR NOT EXISTS (SELECT 1 FROM source_uploads u WHERE u.id = r.source_id AND u.state = 'approved' AND u.bundle IS NOT NULL AND u.expires_at > now()))")
@@ -46,6 +47,7 @@ pub(crate) async fn sweep(tx: &mut Tx<'_>) -> Result<(), ApiError> {
         .execute(&mut **tx).await?;
     sqlx::query("UPDATE review_steps s SET state = 'cancelled' FROM reviews r WHERE s.review_id = r.id AND r.state IN ('failed','cancelled') AND s.state IN ('queued','leased')")
         .execute(&mut **tx).await?;
+    crate::credentials::sweep(tx).await?;
     Ok(())
 }
 
@@ -370,7 +372,13 @@ pub async fn poll(
     if seq == 0 || seq > i64::MAX as u64 {
         return Err(ApiError::bad("invalid_sequence"));
     }
-    if request.payload.live_tools.len() > 1
+    if request.payload.live_tools.len() > 3
+        || request
+            .payload
+            .live_tools
+            .iter()
+            .enumerate()
+            .any(|(i, t)| request.payload.live_tools[..i].contains(t))
         || (!request.payload.live_tests && !request.payload.live_tools.is_empty())
     {
         return Err(ApiError::bad("invalid_live_tools"));

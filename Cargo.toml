@@ -23,6 +23,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net
 tower-http = { version = "0.6", features = ["set-header"] }
 uuid = { version = "1.22", features = ["serde", "v4"] }
 url = "2.5"
+aes-gcm = "0.11.1"
+zeroize = "1.9"
+hex = "0.4"
+getrandom = "0.4"
 
 [dev-dependencies]
 http-body-util = "0.1"

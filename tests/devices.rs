@@ -59,7 +59,10 @@ async fn admitted_agent_directory_excludes_operator_details_and_unapproved_devic
             "declared_model",
             "id",
             "last_seen_at",
+            "live_tests",
+            "live_tools",
             "reported_os",
+            "reports_received",
             "runtime",
             "runtime_version",
             "state"
@@ -78,6 +81,76 @@ async fn admitted_agent_directory_excludes_operator_details_and_unapproved_devic
         .request("GET", "/internal/agents", Value::Null, caller)
         .await;
     assert_eq!(after, json!([]));
+    test.finish().await;
+}
+
+#[tokio::test]
+async fn signed_system_details_update_existing_agents_without_exposing_machine_identity() {
+    let test = TestApp::new().await;
+    let key = DeviceKey::from_bytes(&[203; 32]);
+    let id = test.online(&key).await;
+    let path = format!("/v1/devices/{id}/heartbeat");
+    let system = AgentSystem {
+        os_name: "Kali GNU/Linux".into(),
+        os_version: Some("2026.3".into()),
+        architecture: "x86_64".into(),
+        relay_version: "0.0.1".into(),
+    };
+    let mut heartbeat = Heartbeat {
+        sequence: 2,
+        paused: false,
+        running: 0,
+        system: Some(system.clone()),
+    };
+    assert_eq!(
+        test.signed(&key, &path, heartbeat.clone()).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        test.signed(&key, &path, heartbeat.clone()).await.1["replayed"],
+        true
+    );
+    heartbeat.system.as_mut().unwrap().os_version = Some("changed".into());
+    assert_eq!(
+        test.signed(&key, &path, heartbeat.clone()).await.0,
+        StatusCode::CONFLICT
+    );
+    heartbeat.sequence = 3;
+    heartbeat.system.as_mut().unwrap().os_name = "invalid\nname".into();
+    assert_eq!(
+        test.signed(&key, &path, heartbeat.clone()).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    heartbeat.system = None; // Older relay heartbeats keep the latest known details.
+    assert_eq!(test.signed(&key, &path, heartbeat).await.0, StatusCode::OK);
+    let (_, list) = test
+        .request(
+            "GET",
+            "/internal/agents",
+            Value::Null,
+            Some((Uuid::new_v4(), false)),
+        )
+        .await;
+    assert_eq!(list[0]["system"], serde_json::to_value(system).unwrap());
+    assert_eq!(list[0]["reports_received"], 0);
+    for field in [
+        "compute_group",
+        "operator_id",
+        "operator_name",
+        "public_key",
+        "label",
+    ] {
+        assert!(list[0].get(field).is_none());
+    }
+    let (_, own) = test
+        .request(
+            "GET",
+            "/internal/devices",
+            Value::Null,
+            Some((test.owner, false)),
+        )
+        .await;
+    assert_eq!(own[0]["system"], list[0]["system"]);
     test.finish().await;
 }
 
@@ -275,6 +348,7 @@ impl TestApp {
                 key,
                 &format!("/v1/devices/{id}/heartbeat"),
                 Heartbeat {
+                    system: None,
                     sequence: 1,
                     paused: false,
                     running: 0,
@@ -358,6 +432,7 @@ impl TestApp {
                 key,
                 &format!("/v1/devices/{id}/heartbeat"),
                 Heartbeat {
+                    system: None,
                     sequence: 1,
                     paused: false,
                     running: 0
@@ -407,6 +482,7 @@ async fn pairs_requires_separate_approval_tracks_presence_and_revokes() {
             &key,
             &path,
             Heartbeat {
+                system: None,
                 sequence: 1,
                 paused: false,
                 running: 0,
@@ -422,6 +498,7 @@ async fn pairs_requires_separate_approval_tracks_presence_and_revokes() {
             &key,
             &path,
             Heartbeat {
+                system: None,
                 sequence: 2,
                 paused: false,
                 running: 0,
@@ -438,6 +515,7 @@ async fn pairs_requires_separate_approval_tracks_presence_and_revokes() {
             &key,
             &path,
             Heartbeat {
+                system: None,
                 sequence: 3,
                 paused: true,
                 running: 0,
@@ -461,6 +539,7 @@ async fn pairs_requires_separate_approval_tracks_presence_and_revokes() {
             &key,
             &path,
             Heartbeat {
+                system: None,
                 sequence: 4,
                 paused: false,
                 running: 0,
@@ -489,6 +568,7 @@ async fn old_or_conflicting_heartbeats_do_not_refresh_liveness() {
     test.approve(id).await;
     let path = format!("/v1/devices/{id}/heartbeat");
     let heartbeat = Heartbeat {
+        system: None,
         sequence: 1,
         paused: false,
         running: 0,
@@ -508,6 +588,7 @@ async fn old_or_conflicting_heartbeats_do_not_refresh_liveness() {
             &key,
             &path,
             Heartbeat {
+                system: None,
                 sequence: 1,
                 paused: true,
                 running: 0,
@@ -520,6 +601,7 @@ async fn old_or_conflicting_heartbeats_do_not_refresh_liveness() {
             &key,
             &path,
             Heartbeat {
+                system: None,
                 sequence: 2,
                 paused: false,
                 running: 0,
@@ -543,6 +625,7 @@ async fn old_or_conflicting_heartbeats_do_not_refresh_liveness() {
         &path,
         Utc::now().timestamp(),
         Heartbeat {
+            system: None,
             sequence: 1,
             paused: false,
             running: 0,
@@ -622,6 +705,7 @@ async fn account_boundaries_and_device_signatures_are_enforced() {
             &other_key,
             &format!("/v1/devices/{id}/heartbeat"),
             Heartbeat {
+                system: None,
                 sequence: 1,
                 paused: false,
                 running: 0,
@@ -758,6 +842,7 @@ async fn standalone_gateway_preserves_signed_pairing_approval_and_work_delivery(
             &key,
             &format!("/v1/devices/{id}/heartbeat"),
             Heartbeat {
+                system: None,
                 sequence: 1,
                 paused: false,
                 running: 0,
@@ -786,6 +871,7 @@ async fn standalone_gateway_preserves_signed_pairing_approval_and_work_delivery(
             &key,
             &format!("/v1/devices/{id}/heartbeat"),
             Heartbeat {
+                system: None,
                 sequence: 2,
                 paused: false,
                 running: 0,
@@ -1195,6 +1281,7 @@ async fn queue_capacity_unsupported_targets_and_ineligible_devices_fail_before_a
         &key,
         &format!("/v1/devices/{id}/heartbeat"),
         Heartbeat {
+            system: None,
             sequence: 1,
             paused: true,
             running: 0,
@@ -1492,6 +1579,7 @@ async fn renewal_cannot_revive_paused_stale_expired_replaced_cancelled_or_revoke
         &key,
         &heartbeat_path,
         Heartbeat {
+            system: None,
             sequence: 2,
             paused: true,
             running: 1,
@@ -1506,6 +1594,7 @@ async fn renewal_cannot_revive_paused_stale_expired_replaced_cancelled_or_revoke
         &key,
         &heartbeat_path,
         Heartbeat {
+            system: None,
             sequence: 3,
             paused: false,
             running: 1,
@@ -1525,6 +1614,7 @@ async fn renewal_cannot_revive_paused_stale_expired_replaced_cancelled_or_revoke
         &key,
         &heartbeat_path,
         Heartbeat {
+            system: None,
             sequence: 4,
             paused: false,
             running: 1,

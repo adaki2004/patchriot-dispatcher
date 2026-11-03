@@ -33,6 +33,8 @@ struct DeviceRow {
     private_work_approved: bool,
     website_reviews: bool,
     live_tests: bool,
+    live_tools: DbJson<Vec<pentests::LiveToolProfile>>,
+    system_info: Option<DbJson<AgentSystem>>,
     last_seen_at: Option<DateTime<Utc>>,
     sequence: i64,
     last_payload_hash: Option<String>,
@@ -71,6 +73,7 @@ impl DeviceRow {
             runtime_version: intro.runtime_version.clone(),
             declared_model: intro.declared_model.clone(),
             reported_os: intro.reported_os.clone(),
+            system: self.system_info.as_ref().map(|s| s.0.clone()),
             compute_group: intro.compute_group.clone(),
             approval: self.approval.clone(),
             private_work_approved: self.private_work_approved,
@@ -253,17 +256,7 @@ pub async fn list(
     .fetch_all(&state.pool)
     .await?;
     let ids: Vec<_> = rows.iter().map(|row| row.id).collect();
-    // Derive counts from accepted leases, so a lost-reply retry cannot add a
-    // contribution twice. Read only the already-authorized devices' counts;
-    // never return the corresponding requesters, targets or result contents.
-    let counts: HashMap<Uuid, i64> = sqlx::query_as::<_, (Uuid, i64)>(
-        "SELECT device_id, count(*) FROM work_leases WHERE device_id = ANY($1) AND state = 'completed' AND result_hash IS NOT NULL GROUP BY device_id",
-    )
-    .bind(&ids)
-    .fetch_all(&state.pool)
-    .await?
-    .into_iter()
-    .collect();
+    let counts = report_counts(&state.pool, &ids).await?;
     Ok(Json(
         rows.iter()
             .map(|row| {
@@ -273,6 +266,23 @@ pub async fn list(
             })
             .collect(),
     ))
+}
+
+async fn report_counts(
+    pool: &sqlx::PgPool,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, i64>, sqlx::Error> {
+    // Derive counts from accepted leases, so a lost-reply retry cannot add a
+    // contribution twice. Read only the already-authorized devices' counts;
+    // never return the corresponding requesters, targets or result contents.
+    Ok(sqlx::query_as::<_, (Uuid, i64)>(
+        "SELECT device_id, count(*) FROM work_leases WHERE device_id = ANY($1) AND state = 'completed' AND result_hash IS NOT NULL GROUP BY device_id",
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect())
 }
 
 pub async fn pairing_info(
@@ -293,6 +303,8 @@ pub async fn agents(
     let rows = sqlx::query_as::<_, DeviceRow>(
         "SELECT d.*, o.display_name AS operator_name FROM devices d JOIN operators o ON o.id = d.operator_id WHERE d.approval = 'approved' ORDER BY d.last_seen_at DESC NULLS LAST, d.id LIMIT 200",
     ).fetch_all(&state.pool).await?;
+    let ids: Vec<_> = rows.iter().map(|row| row.id).collect();
+    let counts = report_counts(&state.pool, &ids).await?;
     Ok(Json(
         rows.iter()
             .map(|row| AgentSummary {
@@ -303,6 +315,14 @@ pub async fn agents(
                 declared_model: row.introduction.declared_model.clone(),
                 state: row.state().into(),
                 last_seen_at: row.last_seen_at.map(|time| time.timestamp()),
+                system: row.system_info.as_ref().map(|s| s.0.clone()),
+                live_tests: row.private_work_approved && row.live_tests,
+                live_tools: if row.private_work_approved && row.live_tests {
+                    row.live_tools.0.clone()
+                } else {
+                    vec![]
+                },
+                reports_received: counts.get(&row.id).copied().unwrap_or(0) as u64,
             })
             .collect(),
     ))
@@ -421,6 +441,9 @@ pub async fn heartbeat(
     if input.sequence == 0 || input.sequence > i64::MAX as u64 || input.running > 1 {
         return Err(ApiError::bad("invalid_heartbeat"));
     }
+    if let Some(system) = &input.system {
+        system.validate().map_err(ApiError::bad)?;
+    }
     let hash = payload_hash(&input)?;
     let mut tx = state.pool.begin().await?;
     let mut row =
@@ -441,8 +464,8 @@ pub async fn heartbeat(
         return Err(ApiError::conflict("stale_or_conflicting_heartbeat"));
     }
     if !replayed {
-        let seen: DateTime<Utc> = sqlx::query_scalar("UPDATE devices SET sequence = $1, last_payload_hash = $2, last_seen_at = now(), paused = $3, running = $4, updated_at = now() WHERE id = $5 RETURNING last_seen_at")
-            .bind(input.sequence as i64).bind(hash).bind(input.paused).bind(input.running as i16).bind(id).fetch_one(&mut *tx).await?;
+        let seen: DateTime<Utc> = sqlx::query_scalar("UPDATE devices SET sequence = $1, last_payload_hash = $2, last_seen_at = now(), paused = $3, running = $4, system_info = COALESCE($6, system_info), updated_at = now() WHERE id = $5 RETURNING last_seen_at")
+            .bind(input.sequence as i64).bind(hash).bind(input.paused).bind(input.running as i16).bind(id).bind(input.system.as_ref().map(DbJson)).fetch_one(&mut *tx).await?;
         row.last_seen_at = Some(seen);
         row.sequence = input.sequence as i64;
         row.paused = input.paused;

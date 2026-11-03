@@ -418,7 +418,7 @@ async fn next_live_step(
           AND d.approval='approved' AND d.private_work_approved AND NOT d.paused
           AND d.last_seen_at>now()-interval '30 seconds'
           AND d.introduction->>'runtime'='hermes'
-          AND d.introduction->>'declared_model'='abliterated-model-large-v2'
+          AND d.introduction->>'declared_model'=ANY($5)
           AND (d.id=$1 OR (d.live_tests AND d.work_polled_at>now()-interval '30 seconds'))
           AND (CASE WHEN d.id=$1 THEN $4::jsonb ELSE d.live_tools END)
               @> COALESCE(r.pentest_context->'scope'->'tools','[]'::jsonb)
@@ -429,7 +429,7 @@ async fn next_live_step(
         ORDER BY COALESCE(r.funded_at,r.created_at), r.id, s.position
         LIMIT 1 FOR UPDATE OF s
     "#).bind(id).bind(device.operator_id).bind(&device.introduction.compute_group)
-        .bind(DbJson(tools)).fetch_optional(&mut **tx).await?;
+        .bind(DbJson(tools)).bind(&patchriot_protocol::pentests::LiveProvider::MODELS[..]).fetch_optional(&mut **tx).await?;
     Ok(next
         .filter(|(_, assigned)| *assigned == id)
         .map(|(step, _)| step))
@@ -473,7 +473,12 @@ pub async fn poll(
         return Err(ApiError::bad("website_reviews_require_agent"));
     }
     if request.payload.live_tests
-        && device.introduction.declared_model.as_deref() != Some("abliterated-model-large-v2")
+        && device
+            .introduction
+            .declared_model
+            .as_deref()
+            .and_then(patchriot_protocol::pentests::LiveProvider::from_model)
+            .is_none()
     {
         return Err(ApiError::bad("live_model_not_supported"));
     }

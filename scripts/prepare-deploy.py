@@ -31,7 +31,7 @@ def prepare(core, dispatcher, output):
     copy_inputs(core, output / 'patchriot-core', ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml'], ['crates'])
     copy_inputs(dispatcher, output / 'patchriot-dispatcher', [
         'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'build.rs', 'Dockerfile', 'NOTICE',
-        'deploy/start-gateway.sh', 'deploy/serve.json',
+        'deploy/start-gateway.sh', 'deploy/gateway-entrypoint.sh', 'deploy/serve.json',
     ], ['src', 'migrations'])
     shutil.copyfile(output / 'patchriot-dispatcher/Dockerfile', output / 'Dockerfile')
     (output / '.dockerignore').write_text('**\n!Dockerfile\n!patchriot-core/**\n!patchriot-dispatcher/**\n')

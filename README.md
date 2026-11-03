@@ -67,6 +67,8 @@ Leaving `PATCHRIOT_RELAY_BIND` unset preserves the existing local/internal setup
 
 **Rust schedules the work.** There is no lead Hermes agent in the dispatcher. Code checks permissions, records the agreed team and assigns investigator, reproducer and challenger roles. Workers use Hermes through the relay’s isolated adapter: local models for offline modes, or the explicitly configured hosted provider for live HTTP tests.
 
+Live testing uses one discovery pass followed by targeted reproduction and review. With relay adapter 9, only Scout must run the requested ARTEX engine. Later roles still need their own request evidence, a usable assessment, confirmed cleanup and any required authenticated/anonymous access checks. The dispatcher takes the role from its saved assignment. An incomplete Scout leaves the overall review incomplete; a failed engine run from an older follow-up worker also stays incomplete. Deploy this dispatcher before upgrading the relay image. Existing scopes and saved reports keep their format.
+
 JEV is an optional, separate scope-screening call through OpenRouter. It receives only the consented scope and permission note, and cannot approve work or change tool permissions. Its decisions API is not interchangeable with a chat-completions model.
 
 A lower-cost model can later help clarify a request or summarize evidence. Select it using owned security-review examples, including false-positive checks and legitimate tasks it refuses. A model advertised as uncensored is not a capability or reliability guarantee. Keep actual authorization, tool limits and payment rules in code. Private material must not be sent to a different provider without the required disclosure and consent.

@@ -506,6 +506,7 @@ pub async fn poll(
 #[derive(FromRow)]
 struct LeaseRow {
     step_id: Uuid,
+    role: String,
     device_id: Uuid,
     review_id: Uuid,
     state: String,
@@ -520,7 +521,7 @@ struct LeaseRow {
 }
 
 async fn lease(tx: &mut Tx<'_>, id: Uuid) -> Result<LeaseRow, ApiError> {
-    sqlx::query_as::<_, LeaseRow>("SELECT l.step_id, l.device_id, s.review_id, l.state, l.expires_at, LEAST(l.deadline_at, r.deadline_at) AS deadline_at, l.renewal_sequence, r.mode, l.result_hash, l.fixture_matches, l.evidence_complete, s.current_lease_id FROM work_leases l JOIN review_steps s ON s.id = l.step_id JOIN reviews r ON r.id = s.review_id WHERE l.id = $1 FOR UPDATE OF l, s")
+    sqlx::query_as::<_, LeaseRow>("SELECT l.step_id, s.role, l.device_id, s.review_id, l.state, l.expires_at, LEAST(l.deadline_at, r.deadline_at) AS deadline_at, l.renewal_sequence, r.mode, l.result_hash, l.fixture_matches, l.evidence_complete, s.current_lease_id FROM work_leases l JOIN review_steps s ON s.id = l.step_id JOIN reviews r ON r.id = s.review_id WHERE l.id = $1 FOR UPDATE OF l, s")
         .bind(id).fetch_optional(&mut **tx).await?.ok_or_else(ApiError::missing)
 }
 
@@ -718,7 +719,10 @@ pub async fn complete(
         {
             return Err(ApiError::bad("invalid_live_evidence"));
         }
-        (None, Some(result.evidence_complete(&context.scope)))
+        (
+            None,
+            Some(result.evidence_complete_for_role(&context.scope, role(&lease.role)?)),
+        )
     } else {
         (Some(input.result.matches_fixture()), None)
     };

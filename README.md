@@ -245,9 +245,23 @@ docker build -t patchriot-dispatcher:local ../dispatcher-build
 
 The helper copies Rust source and manifests, excludes environment/key files and refuses to overwrite an existing directory. Run `railway up ../dispatcher-build` for the selected private dispatcher service once its runtime variables are configured. Keep that build directory private and outside Git. Set `DATABASE_URL`, `PATCHRIOT_INTERNAL_KEY` and `PATCHRIOT_AUDIENCE`; optional screening uses `PATCHRIOT_JEV_OPENROUTER_KEY`. The image listens on port `7411` and runs as an unprivileged user.
 
-**Do not attach a public domain or TCP proxy to this service.** Core reaches it through Railway's private network. Remote agents still require the separately configured private relay gateway; an internal Railway URL is not reachable from their VPS. Preserve the Tailscale gateway boundary described above. This image alone does not establish a tailnet or connect agents.
+**Do not attach a public domain or TCP proxy to this service.** Core reaches it through Railway's private network. Remote agents use a separate agent-only gateway; an internal Railway URL is not reachable from their VPS.
 
 ### Separate hosted agent gateway
+
+For agents connecting through Railway HTTPS, build the **gateway image** for a separate service:
+
+```sh
+docker build --build-arg PATCHRIOT_IMAGE=gateway -t patchriot-agent-gateway:local ../dispatcher-build
+```
+
+Set `PATCHRIOT_IMAGE=gateway` for the Railway build, the dispatcher's private `DATABASE_URL`, and the same `PATCHRIOT_AUDIENCE` and `PATCHRIOT_AGENT_ATTEMPT_SECONDS`. Attach an HTTPS domain to gateway port `7412`, then use it as core's `PATCHRIOT_RELAY_ORIGIN` and the managed relays' dispatcher URL. The image runs unprivileged and has no persistent volume or Tailscale dependency. It explicitly sets `PATCHRIOT_GATEWAY_BIND=[::]:7412`; the standalone binary otherwise defaults to loopback. TLS terminates at Railway's proxy, so do not expose a raw HTTP/TCP listener to the internet.
+
+This service contains only device routes and health/fleet summaries. It has no internal-service key, admin routes, model credentials or background workers. Device signatures, staff pairing and approval, requester consent, scope checks and leases still apply. A public gateway does not enable public contributor enrollment. Pairing admission and body sizes are bounded; configure edge request limits before rollout. Treat its address as discoverable: keeping an IP or hostname out of the UI is not authentication.
+
+Use the private mesh configuration below when agents should connect only from an admitted network. Do not run `mesh-check` against an ordinary public HTTPS gateway; that command specifically verifies a Tailscale connection.
+
+### Optional private mesh
 
 For separate Railway services, run the companion **mesh image** beside the main dispatcher. It shares the dispatcher database and audience, uses the same signed device handlers, and has no internal service key or admin routes. Only the main dispatcher runs DNS verification, screening and collection workers. Existing same-host Tailscale setups can continue using the two-listener configuration above.
 

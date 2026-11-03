@@ -20,6 +20,13 @@ ENV PATCHRIOT_BIND=[::]:7411
 EXPOSE 7411
 ENTRYPOINT ["/usr/local/bin/patchriot-dispatcher"]
 
+# Managed MVP: Railway terminates HTTPS; only device routes are exposed here.
+FROM runtime AS gateway
+COPY --from=rust /source/patchriot-dispatcher/target/release/patchriot-relay-gateway /usr/local/bin/patchriot-relay-gateway
+ENV PATCHRIOT_GATEWAY_BIND=[::]:7412
+EXPOSE 7412
+ENTRYPOINT ["/usr/local/bin/patchriot-relay-gateway"]
+
 # Optional companion: userspace Tailscale, no TUN device or network capabilities.
 FROM tailscale/tailscale:1.104.4@sha256:ed6480b33c6eb67c9cbd203ed42b9fb57e361986725b6856def71b7a3d9e276c AS tailscale
 FROM runtime AS mesh

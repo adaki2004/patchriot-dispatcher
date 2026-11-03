@@ -66,7 +66,7 @@ impl AppState {
             ..=patchriot_protocol::MAX_AGENT_ATTEMPT_SECONDS)
             .contains(&seconds)
         {
-            return Err("agent attempt limit must be 600..1800 seconds");
+            return Err("agent attempt limit must be 600..3600 seconds");
         }
         self.agent_attempt_seconds = seconds;
         Ok(self)

@@ -1805,8 +1805,8 @@ async fn a_hard_deadline_ends_work_even_with_a_recent_heartbeat_and_unexpired_so
 
 #[tokio::test]
 async fn configured_cpu_budget_is_saved_and_renewal_does_not_extend_it() {
-    let mut app = TestApp::with_budget(1800).await;
-    for seconds in [0, 599, 1801, u64::MAX] {
+    let mut app = TestApp::with_budget(3600).await;
+    for seconds in [0, 599, 3601, u64::MAX] {
         assert!(
             AppState::new(
                 app.pool.clone(),
@@ -1819,9 +1819,20 @@ async fn configured_cpu_budget_is_saved_and_renewal_does_not_extend_it() {
         );
     }
     let fleet = app.request("GET", "/v1/fleet", json!({}), None).await;
-    assert_eq!(fleet.1["agent_review_timeout_seconds"], 5700);
+    assert_eq!(fleet.1["agent_review_timeout_seconds"], 11100);
     let review = app.agent_review().await;
-    assert_eq!(review.deadline_at - review.created_at, 5700);
+    assert_eq!(review.deadline_at - review.created_at, 11100);
+    // The database also rejects an out-of-range allowance, independently of
+    // configuration validation. A failed update must preserve the reservation.
+    let invalid = sqlx::query("UPDATE reviews SET agent_attempt_seconds=3601 WHERE id=$1")
+        .bind(review.id)
+        .execute(&app.pool)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        invalid.as_database_error().unwrap().code().as_deref(),
+        Some("23514")
+    );
     // New deployment defaults must not rewrite an admitted review's limits.
     app.change_budget(600);
     let key = DeviceKey::from_bytes(&[110; 32]);
@@ -1834,7 +1845,7 @@ async fn configured_cpu_budget_is_saved_and_renewal_does_not_extend_it() {
     .fetch_one(&app.pool)
     .await
     .unwrap();
-    assert_eq!(duration, 1800);
+    assert_eq!(duration, 3600);
     let first = app.renew(&key, device, work.lease_id, 1).await;
     let second = app.renew(&key, device, work.lease_id, 2).await;
     assert_eq!(first.0, StatusCode::OK);

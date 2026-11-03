@@ -28,7 +28,7 @@ Keep `patchriot-core` beside this repository for the Apache-2.0 protocol crate. 
 | `PATCHRIOT_AUDIENCE` | Stable deployment identifier, e.g. `patchriot-local-v1` |
 | `PATCHRIOT_BIND` | Optional listener; default `127.0.0.1:7411` |
 | `PATCHRIOT_RELAY_BIND` | Optional agent-only listener for Tailscale Serve, e.g. `127.0.0.1:7412`; requires both listeners on loopback |
-| `PATCHRIOT_AGENT_ATTEMPT_SECONDS` | Optional agent limit: `600` by default, at most `1800` |
+| `PATCHRIOT_AGENT_ATTEMPT_SECONDS` | Optional agent limit: `600` by default, at most `3600` |
 | `PATCHRIOT_JEV_OPENROUTER_KEY` | Optional server-only OpenRouter key for consented request screening |
 
 ```sh
@@ -112,7 +112,7 @@ The current scenario, `access_control_v1`, is an owned access-control bug and su
 | Attempts | Up to 3 per role | Same |
 | Review lifetime, including waiting/retries | 15 minutes | Three attempt budgets + 5 minutes; 35 minutes by default |
 
-For a slow CPU pilot, `PATCHRIOT_AGENT_ATTEMPT_SECONDS=1800` permits 30 minutes per attempt and 95 minutes per review. The limit is saved at admission; changing configuration does not extend existing work or alter a paid reservation. Snapshot retention must cover payment waiting plus the full review. Operators must explicitly raise their relay limit too; their local cap can shorten an assignment.
+For a slow CPU pilot, `PATCHRIOT_AGENT_ATTEMPT_SECONDS=3600` permits 60 minutes per attempt and 185 minutes per review. The limit is saved at admission; changing configuration does not extend existing work or alter a paid reservation. Snapshot retention must cover payment waiting plus the full review. Operators must explicitly raise their relay limit too; their local cap can shorten an assignment.
 
 Renewal requires a signed, increasing sequence, a current assignment and fresh, unpaused presence. Duplicate renewals return the existing expiry and remaining time; they do not add time. Cancellation, expiry and revocation stop renewal. Clients must use a monotonic deadline and stop before losing the lease, including during a network outage.
 
@@ -289,4 +289,4 @@ Set `PATCHRIOT_CREDENTIAL_KEY` to the same 32 random bytes, hex encoded, on the 
 
 **Rolling upgrades:** update core before exposing new capability names, then update dispatcher/gateway, then the relays. Old core versions reject unknown capability names. Advanced options become available only when all selected components support them.
 
-For the hosted calibration run, `PATCHRIOT_AGENT_ATTEMPT_SECONDS=1200` is set on both dispatcher and gateway. Relays also use `max_attempt_seconds=1200`. The shared protocol accepts up to 96 model calls per role; relays enforce the actual call and cost allowance. Upgrade core and both servers before expanded-budget relays so their progress and reports are not rejected. Existing requests keep their saved deadlines.
+For the hosted calibration run, `PATCHRIOT_AGENT_ATTEMPT_SECONDS=3600` is set on both dispatcher and gateway. Relays also use `max_attempt_seconds=3600`. The shared protocol accepts up to 200 model calls per role; relays enforce the actual call and cost allowance. Migration 20 widens the saved allowance without changing existing rows. Upgrade core and both servers before expanded-budget relays so their progress and reports are not rejected. Existing requests keep their saved deadlines.

@@ -495,7 +495,7 @@ async fn concurrent_cancellation_and_funding_never_revive_cancelled_work() {
 
 #[tokio::test]
 async fn paid_cpu_budget_covers_retention_and_survives_configuration_changes() {
-    let mut app = TestApp::with_budget(1800).await;
+    let mut app = TestApp::with_budget(3600).await;
     let (site, snapshot) = saved_site(&app).await;
     let crew = crew(&app).await;
     let plan = app
@@ -506,7 +506,7 @@ async fn paid_cpu_budget_covers_retention_and_survives_configuration_changes() {
             Some((app.owner, false)),
         )
         .await;
-    assert_eq!(plan.1["review_timeout_seconds"], 5700);
+    assert_eq!(plan.1["review_timeout_seconds"], 11100);
     let input = admission(&snapshot, &crew);
     sqlx::query(
         "UPDATE site_checks SET evidence_expires_at=now()+interval '40 minutes' WHERE id=$1",
@@ -542,7 +542,7 @@ async fn paid_cpu_budget_covers_retention_and_survives_configuration_changes() {
     assert_eq!(
         funded.1["deadline_at"].as_i64().unwrap()
             - funded.1["payment"]["funded_at"].as_i64().unwrap(),
-        5700
+        11100
     );
     let retry = app
         .request("POST", &path, receipt, Some((app.owner, false)))
@@ -557,6 +557,6 @@ async fn paid_cpu_budget_covers_retention_and_survives_configuration_changes() {
     .fetch_one(&app.pool)
     .await
     .unwrap();
-    assert_eq!(duration, 1800);
+    assert_eq!(duration, 3600);
     app.finish().await;
 }

@@ -37,6 +37,7 @@ async fn website_candidates_need_recent_work_poll_not_just_presence_or_replays()
             key,
             &format!("/v1/devices/{id}/heartbeat"),
             Heartbeat {
+                system: None,
                 sequence: 2,
                 paused: false,
                 running: 0,

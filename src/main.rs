@@ -26,8 +26,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "600".into())
         .parse::<u64>()
         .map_err(|_| "PATCHRIOT_AGENT_ATTEMPT_SECONDS must be an integer")?;
-    let state =
-        AppState::new(pool.clone(), internal_key, audience)?.with_agent_attempt_seconds(seconds)?;
+    let state = AppState::new(pool.clone(), internal_key, audience)?
+        .with_agent_attempt_seconds(seconds)?
+        .with_credential_key(std::env::var("PATCHRIOT_CREDENTIAL_KEY").ok())?;
     let jev = std::env::var("PATCHRIOT_JEV_OPENROUTER_KEY")
         .ok()
         .map(|key| screening::Jev::new(&key))
@@ -38,6 +39,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => None,
     };
     let (stop, stopped) = tokio::sync::watch::channel(false);
+    let cleanup = tokio::spawn(patchriot_dispatcher::run_cleanup(
+        pool.clone(),
+        stopped.clone(),
+    ));
     let screening = tokio::spawn(screening::run_worker(pool.clone(), jev, stopped.clone()));
     let collector = tokio::spawn(websites::run_worker(pool.clone(), stopped.clone()));
     let resolver = hickory_resolver::TokioResolver::builder_tokio()?.build()?;
@@ -71,6 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     collector.await?;
     screening.await?;
     ownership.await?;
+    cleanup.await?;
     result?;
     Ok(())
 }

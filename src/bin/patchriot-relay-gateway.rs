@@ -18,7 +18,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = connect(&database_url)
         .await
         .map_err(|_| "database connection or migration failed")?;
-    let state = AppState::relay_only(pool, audience)?.with_agent_attempt_seconds(seconds)?;
+    let state = AppState::relay_only(pool, audience)?
+        .with_agent_attempt_seconds(seconds)?
+        .with_credential_key(std::env::var("PATCHRIOT_CREDENTIAL_KEY").ok())?;
     // This separate variable never changes the main dispatcher's internal bind.
     // A non-loopback listener needs HTTPS termination; the binary does not add TLS.
     let listener = tokio::net::TcpListener::bind(bind).await?;

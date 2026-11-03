@@ -11,7 +11,7 @@ The Rust service that approves devices, queues reviews and assigns work to agent
 
 A saved live-test scope gets a fresh DNS TXT challenge for each exact domain. The challenge belongs to the requester and immutable scope. **Refresh DNS** starts a persisted five-minute check; repeated clicks do not extend it. Six windows per request are allowed. The worker checks at most eight due records per pass, four concurrently, with a four-second lookup timeout and a thirty-second retry interval.
 
-Every domain must verify before staff can approve the scope. DNS proof and permission expire with the request after 24 hours. Scheduling, evidence access and renewal recheck the saved permission; expiry or revocation stops unfinished work. Proof never permits another account, another scope or arbitrary tools. Migration 13 also gives still-active older scopes fresh challenges; they do not bypass this gate.
+Every domain must verify before the request automatically becomes eligible for checkout. Verification creates no work and spends no money; only the requester can select the team and pay or redeem a coupon. Staff can still reject or revoke a scope. Migration 17 advances existing, unexpired, fully verified pending requests; blocked and incomplete requests remain unchanged. DNS proof and permission expire with the request after 24 hours. Scheduling, evidence access and renewal recheck the saved permission; expiry or revocation stops unfinished work. Proof never permits another account, another scope or arbitrary tools. Migration 13 also gives still-active older scopes fresh challenges; they do not bypass this gate.
 
 The verifier uses the host’s DNS resolver. Permit DNS egress and configure a trusted resolver for the deployment. It looks up the exact `_patchriot.<domain>.` TXT name, combines chunks within one record, and requires an exact token match. Missing records, DNS failures and late replies never grant access. DNS control does not prove legal authority over everything reachable through a domain; staff still review scope and authorization.
 
@@ -28,7 +28,7 @@ Keep `patchriot-core` beside this repository for the Apache-2.0 protocol crate. 
 | `PATCHRIOT_AUDIENCE` | Stable deployment identifier, e.g. `patchriot-local-v1` |
 | `PATCHRIOT_BIND` | Optional listener; default `127.0.0.1:7411` |
 | `PATCHRIOT_RELAY_BIND` | Optional agent-only listener for Tailscale Serve, e.g. `127.0.0.1:7412`; requires both listeners on loopback |
-| `PATCHRIOT_AGENT_ATTEMPT_SECONDS` | Optional agent limit: `600` by default, at most `1800` |
+| `PATCHRIOT_AGENT_ATTEMPT_SECONDS` | Optional agent limit: `600` by default, at most `3600` |
 | `PATCHRIOT_JEV_OPENROUTER_KEY` | Optional server-only OpenRouter key for consented request screening |
 
 ```sh
@@ -86,7 +86,7 @@ Install the unit in `/etc/systemd/system`, run `systemctl daemon-reload`, then `
 
 Five-minute pairing codes are claimed once. Requests carry Ed25519 proofs binding the deployment, route, timestamp and typed payload. Persistent counters reject conflicting replays; exact heartbeat retries do not extend liveness. Devices become offline after 30 seconds without a fresh heartbeat. A revoked key cannot be reapproved.
 
-Starting a signed challenge does not enroll a device. Core permits only administrators to claim new devices or retrieve connection details. The signed-in agent directory remains available to members. The directory shares only approved devices’ OS, harness, model and heartbeat; private profiles and assignments remain separate. OS is a declaration added by new relays. Older identities and signatures remain valid. Deploy this dispatcher before installing a relay that reports OS during initialization.
+Starting a signed challenge does not enroll a device. Core permits only administrators to claim new devices or retrieve connection details. The signed-in agent directory remains available to members. The directory shares approved devices’ OS/version, architecture, relay and runner versions, model, enabled website tools, report count and heartbeat. Private profiles, machine groups and assignments remain separate. Signed heartbeats update software details on already paired agents; these are declarations, not attestation. Older heartbeats remain valid. Deploy this dispatcher and its migrations before updating relays.
 
 Approval must assess an operator and their agent's security-review, reproduction and **authorized penetration-testing capabilities** before private customer work. Pairing alone proves only control of a key.
 
@@ -112,7 +112,7 @@ The current scenario, `access_control_v1`, is an owned access-control bug and su
 | Attempts | Up to 3 per role | Same |
 | Review lifetime, including waiting/retries | 15 minutes | Three attempt budgets + 5 minutes; 35 minutes by default |
 
-For a slow CPU pilot, `PATCHRIOT_AGENT_ATTEMPT_SECONDS=1800` permits 30 minutes per attempt and 95 minutes per review. The limit is saved at admission; changing configuration does not extend existing work or alter a paid reservation. Snapshot retention must cover payment waiting plus the full review. Operators must explicitly raise their relay limit too; their local cap can shorten an assignment.
+For a slow CPU pilot, `PATCHRIOT_AGENT_ATTEMPT_SECONDS=3600` permits 60 minutes per attempt and 185 minutes per review. The limit is saved at admission; changing configuration does not extend existing work or alter a paid reservation. Snapshot retention must cover payment waiting plus the full review. Operators must explicitly raise their relay limit too; their local cap can shorten an assignment.
 
 Renewal requires a signed, increasing sequence, a current assignment and fresh, unpaused presence. Duplicate renewals return the existing expiry and remaining time; they do not add time. Cancellation, expiry and revocation stop renewal. Clients must use a monotonic deadline and stop before losing the lease, including during a network outage.
 
@@ -226,9 +226,11 @@ Raw bundles expire after seven days. Owner deletion cancels unfinished reviews a
 
 ## Live website pilot
 
+Core can reserve a live assessment through `POST /internal/pentests/:id/admit-review`. It stays `awaiting_payment` until core confirms the matching settlement. Admission requires domain proof, scope approval, the named team and separate provider consent. Funding rechecks permission and team availability; it cannot extend an expired scope or restart cancelled work. Coupons use the existing idempotent start after core reserves the code.
+
 `pentest_agent` / `live_http_v1` is separate from snapshot collection. Migration `0012` stores an immutable origin/method/objective scope, owner permission note, admin decision and 24-hour expiry. The owner selects three private-approved devices with the signed `live_tests` opt-in and separately consents to operator and **abliteration.ai** access. Existing device polls omit that flag and remain compatible.
 
-Internal routes are `GET/POST /internal/pentests`, `POST /internal/pentests/:id/decision`, `GET /internal/pentests/:id/review-plan` and `POST /internal/pentests/:id/review`. Core only exposes live starts in `pilot` access mode; this does not bypass paid/coupon admission for other work. Operator earnings and live-mode checkout are not enabled.
+Internal routes are `GET/POST /internal/pentests`, `POST /internal/pentests/:id/decision`, `GET /internal/pentests/:id/review-plan` and `POST /internal/pentests/:id/review`. Core applies its configured pilot, coupon or paid-access mode. A browser cannot claim that a payment settled.
 
 Roles stay pinned and run sequentially. Only their active device lease can download scope and prior reports at `/v1/devices/:id/work/pentest-evidence`. The agent-only gateway exposes that signed route, never the internal admin routes. Scope expiry, permission revocation, cancellation or removed device approval blocks further evidence access and renewals. There is one execution attempt per live role; result delivery can retry without running the model again.
 
@@ -276,3 +278,15 @@ Mount a dedicated persistent volume at `/var/lib/tailscale`. [Railway mounts vol
 The gateway listens only on `127.0.0.1:7412`; `deploy/serve.json` shares it over private Tailscale HTTPS on port 443 with Funnel disabled. No public Railway domain or TCP proxy belongs on this service. The launcher stops both processes if either exits, and its container health check requires both local services. Set core's `PATCHRIOT_RELAY_ORIGIN` to the resulting tailnet HTTPS address, then run the relay's `mesh-check` from each admitted agent host before pairing. Network admission still does not approve a device or grant access to customer work.
 
 Check a built gateway locally with `PATCHRIOT_GATEWAY_TEST_IMAGE=patchriot-gateway:local python3 -m unittest discover -s scripts -p 'test_*.py'`. The image checks use disposable volumes and no network credentials to verify privilege removal, persistence and rejection of redirected state paths. They are skipped when the image variable is unset; tailnet enrollment still needs a separate deployment check.
+
+**Optional live engines:** migration `0016` stores the signed `live_tools` capability advertised by each relay. Empty or omitted capabilities retain baseline-only behavior. The `artex_engine_v1` choice is bound to the immutable scope; team selection, payment activation, leases, evidence access and renewal all require it. `GET /internal/pentest-tools` exposes availability to an authenticated core session, not private worker details. A missing, failed or incomplete engine record prevents complete evidence; partial reports remain available for review. Deploy the updated dispatcher before relays advertise the new capability.
+
+### Encrypted test accounts
+
+Set `PATCHRIOT_CREDENTIAL_KEY` to the same 32 random bytes, hex encoded, on the dispatcher **and** its relay gateway. Keep it in the deployment secret store; core, browsers and agent containers do not receive this key. Without it, authenticated assessment is unavailable. Migration 19 adds authenticated ciphertext and expands capability storage for the new runner. Deploy it before adapter 8 agents. Changing the key makes retained credentials unreadable: let active work finish first, then require fresh test-account requests after rotation.
+
+`CreatePentest` may include a Basic or bearer `credentials` object. Its kind, protected GET `auth_check_path` and `authenticated_http_v1` capability must match the immutable scope. An active POST scope additionally requires `accepts_state_changes: true` and `active_web_v1`; older scopes remain read-only. Public account/history responses never contain credentials. Only the approved assigned device's current lease can read them. Ciphertext is bound to the account, request and scope using AES-256-GCM, with a fresh nonce. A credential set serves one assessment; completion, cancellation, revocation or expiry deletes it. A 30-second cleanup loop handles expiry even without device polls. Deletion does not erase an operator's prior copy.
+
+**Rolling upgrades:** update core before exposing new capability names, then update dispatcher/gateway, then the relays. Old core versions reject unknown capability names. Advanced options become available only when all selected components support them.
+
+For the hosted calibration run, `PATCHRIOT_AGENT_ATTEMPT_SECONDS=3600` is set on both dispatcher and gateway. Relays also use `max_attempt_seconds=3600`. The shared protocol accepts up to 200 model calls per role; relays enforce the actual call and cost allowance. Migration 20 widens the saved allowance without changing existing rows. Upgrade core and both servers before expanded-budget relays so their progress and reports are not rejected. Existing requests keep their saved deadlines.

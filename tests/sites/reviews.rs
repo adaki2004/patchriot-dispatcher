@@ -113,6 +113,7 @@ async fn poll(
             website_reviews,
             source_reviews: false,
             live_tests: false,
+            live_tools: vec![],
         },
     )
     .await

@@ -1,6 +1,7 @@
 //! Temporary DNS proof for an account's exact, immutable live-test scope.
 //! Lookups never run inside a database transaction. The proof grants neither
-//! unrestricted testing nor access to other domains; staff approval still applies.
+//! unrestricted testing nor access to other domains. Verified scopes can proceed
+//! to requester consent and checkout; staff can still revoke them.
 use crate::{Actor, ApiError, AppState, actor};
 use axum::{
     Json,
@@ -242,7 +243,9 @@ async fn check_one(
     if active.is_some() {
         sqlx::query("UPDATE domain_challenges SET state=$3,error=$4,last_checked_at=now(),verified_at=CASE WHEN $3='verified' THEN now() ELSE NULL END WHERE pentest_id=$1 AND domain=$2 AND state<>'verified' AND checking_until=$5 AND checking_until>now() AND expires_at>now()")
             .bind(c.pentest_id).bind(&c.domain).bind(state).bind(error).bind(c.checking_until).execute(&mut *tx).await?;
-        sqlx::query("UPDATE pentests p SET ownership_verified_at=now() WHERE id=$1 AND ownership_verified_at IS NULL AND (SELECT count(*) FROM domain_challenges c WHERE c.pentest_id=p.id)=jsonb_array_length(p.scope->'origins') AND NOT EXISTS(SELECT 1 FROM domain_challenges c WHERE c.pentest_id=p.id AND (c.state<>'verified' OR c.expires_at<=now()))")
+        // Approve only after every exact origin is verified. Payment, consent and
+        // worker eligibility remain separate checks; this creates no work.
+        sqlx::query("UPDATE pentests p SET ownership_verified_at=COALESCE(ownership_verified_at,now()),state='approved',decision_note=CASE WHEN state='pending_approval' THEN 'Domain control verified automatically.' ELSE decision_note END WHERE id=$1 AND (SELECT count(*) FROM domain_challenges c WHERE c.pentest_id=p.id)=jsonb_array_length(p.scope->'origins') AND NOT EXISTS(SELECT 1 FROM domain_challenges c WHERE c.pentest_id=p.id AND (c.state<>'verified' OR c.expires_at<=now()))")
             .bind(c.pentest_id).execute(&mut *tx).await?;
     }
     tx.commit().await

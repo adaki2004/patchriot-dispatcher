@@ -64,7 +64,13 @@ pub(super) async fn candidates(
 }
 
 fn model_family(model: &str) -> String {
-    if patchriot_protocol::pentests::LiveProvider::from_model(model).is_some() {
+    if matches!(
+        patchriot_protocol::pentests::LiveProvider::from_model(model),
+        Some(
+            patchriot_protocol::pentests::LiveProvider::Abliteration
+                | patchriot_protocol::pentests::LiveProvider::Venice
+        )
+    ) {
         patchriot_protocol::pentests::LiveProvider::Abliteration
             .model()
             .into()

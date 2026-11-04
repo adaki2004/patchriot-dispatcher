@@ -277,6 +277,47 @@ pub async fn create(
     Ok(Json(view(&state.pool, &caller, id).await?))
 }
 
+/// Read-only counts across the full history, independent of the 50-row lists.
+pub async fn stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ReviewStats>, ApiError> {
+    let caller = actor(&headers, &state)?;
+    if !caller.admin {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "admin_required"));
+    }
+    #[derive(FromRow)]
+    struct Counts {
+        requested: i64,
+        live_requested: i64,
+        awaiting_verification: i64,
+        review_runs: i64,
+        awaiting_payment: i64,
+        queued: i64,
+        running: i64,
+        completed: i64,
+        needs_review: i64,
+        failed: i64,
+        cancelled: i64,
+        as_of: i64,
+    }
+    let c:Counts=sqlx::query_as("SELECT (SELECT count(*) FROM pentests)+(SELECT count(*) FROM site_checks)+(SELECT count(*) FROM source_uploads) AS requested,(SELECT count(*) FROM pentests) AS live_requested,(SELECT count(*) FROM pentests WHERE state='pending_approval' AND ownership_verified_at IS NULL AND staff_authorized_at IS NULL AND expires_at>now()) AS awaiting_verification,count(*) AS review_runs,count(*) FILTER(WHERE state='awaiting_payment') AS awaiting_payment,count(*) FILTER(WHERE state='queued') AS queued,count(*) FILTER(WHERE state='running') AS running,count(*) FILTER(WHERE state='completed') AS completed,count(*) FILTER(WHERE state='needs_review') AS needs_review,count(*) FILTER(WHERE state='failed') AS failed,count(*) FILTER(WHERE state='cancelled') AS cancelled,extract(epoch FROM now())::bigint AS as_of FROM reviews").fetch_one(&state.pool).await?;
+    Ok(Json(ReviewStats {
+        requested: c.requested,
+        live_requested: c.live_requested,
+        awaiting_verification: c.awaiting_verification,
+        review_runs: c.review_runs,
+        awaiting_payment: c.awaiting_payment,
+        queued: c.queued,
+        running: c.running,
+        completed: c.completed,
+        needs_review: c.needs_review,
+        failed: c.failed,
+        cancelled: c.cancelled,
+        as_of: c.as_of,
+    }))
+}
+
 pub async fn list(
     State(state): State<AppState>,
     headers: HeaderMap,

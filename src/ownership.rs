@@ -270,6 +270,24 @@ mod tests {
     use hickory_resolver::proto::rr::{Name, RData, Record, rdata::TXT};
 
     #[test]
+    fn cname_destination_cannot_supply_another_domains_verification() {
+        use hickory_resolver::proto::rr::rdata::CNAME;
+        let query = Name::from_ascii("_patchriot.owned.example.").unwrap();
+        let other = Name::from_ascii("_patchriot.other.example.").unwrap();
+        let records = vec![
+            Record::from_rdata(query, 60, RData::CNAME(CNAME(other.clone()))),
+            Record::from_rdata(
+                other,
+                60,
+                RData::TXT(TXT::new(vec![
+                    "patchriot-domain-verification=matching-token".into(),
+                ])),
+            ),
+        ];
+        assert!(txt_records(&records, "_patchriot.owned.example.").is_empty());
+    }
+
+    #[test]
     fn txt_fragments_join_only_within_one_record_at_the_exact_name() {
         let name = Name::from_ascii("_patchriot.example.com.").unwrap();
         let records = vec![

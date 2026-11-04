@@ -1863,3 +1863,37 @@ async fn configured_cpu_budget_is_saved_and_renewal_does_not_extend_it() {
     );
     app.finish().await;
 }
+
+#[tokio::test]
+async fn admin_usage_counts_cover_the_full_history_without_reading_private_results() {
+    let test = TestApp::new().await;
+    for n in 0..65 {
+        sqlx::query("INSERT INTO reviews(id,requester_id,request_id,scenario,state) VALUES($1,$2,$3,'access_control_v1',$4)")
+            .bind(Uuid::new_v4()).bind(test.owner).bind(Uuid::new_v4()).bind(if n<60 {"completed"} else {"queued"}).execute(&test.pool).await.unwrap();
+    }
+    let path = "/internal/admin/review-stats";
+    assert_eq!(
+        test.request("GET", path, Value::Null, None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        test.request("GET", path, Value::Null, Some((test.owner, false)))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, counts) = test
+        .request("GET", path, Value::Null, Some((test.admin, true)))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(counts["review_runs"], 65);
+    assert_eq!(counts["completed"], 60);
+    assert_eq!(counts["queued"], 5);
+    assert_eq!(
+        counts["requested"], 0,
+        "example runs are not customer target scopes"
+    );
+    assert_eq!(counts["running"], 0);
+    assert!(counts.get("results").is_none());
+    test.finish().await;
+}

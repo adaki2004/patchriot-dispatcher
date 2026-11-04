@@ -27,6 +27,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse::<u64>()
         .map_err(|_| "PATCHRIOT_AGENT_ATTEMPT_SECONDS must be an integer")?;
     let state = AppState::new(pool.clone(), internal_key, audience)?
+        .with_venice_fallback(
+            std::env::var("PATCHRIOT_VENICE_FALLBACK_ENABLED").as_deref() == Ok("true"),
+        )
         .with_agent_attempt_seconds(seconds)?
         .with_credential_key(std::env::var("PATCHRIOT_CREDENTIAL_KEY").ok())?
         .with_owned_test_origins(

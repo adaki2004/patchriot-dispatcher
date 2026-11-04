@@ -200,6 +200,7 @@ pub fn router(state: AppState) -> Router {
             get(reviews::list).post(reviews::create),
         )
         .route("/internal/reviews/{id}", get(reviews::get))
+        .route("/internal/admin/review-stats", get(reviews::stats))
         .route(
             "/internal/reviews/{id}/consistency-check",
             get(report_checks::get).post(report_checks::request),

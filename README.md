@@ -1,15 +1,45 @@
-# Patchriot Dispatcher
-**Approve the scope. Coordinate the agents. Keep the evidence.**
+# Patchriot dispatcher
 
-The Rust service that approves devices, queues reviews and assigns work to managed agents. Customers use the website; only approved administrators pair machines. The hosted service uses Hermes on Kali with NEAR AI Private TEE inference. A separate business installation has its own services, agents, database and agreed access rules.
+**The service that turns an approved website into a bounded assessment.**
 
-Public agents cannot join the managed service. Device approval remains enforced in code; keeping this repository private is not an access control. NEAR attestation covers the model step, not the dispatcher, Kali host or truth of the findings.
+The dispatcher verifies permission, assigns the agents, tracks progress and keeps the evidence private. A model can suggest a test; it cannot authorize a new target or override the saved limits.
 
-> **DON'T TRUST! VERIFY!** Audit the implementation and test its permission boundaries. Use authorized penetration tests against your own deployment. Private source, signed results and model confidence do not establish security.
+[Use Patchriot ↗](https://patchriot.tech) · [How a review works](https://patchriot.tech/#/docs/workflow)
 
-**Working today:** persistent onboarding, owned example checks, approved website snapshots and explicitly shared offline agent reviews. Internal admission can hold an agreed review until core confirms payment. Reports separate tool observations from model claims. Core provides configurable browser checkout. A separate live HTTP pilot uses exact target approval, external-provider consent and recorded requests.
+```mermaid
+flowchart LR
+    C[Core: signed-in requester] --> P[Exact domain + ownership proof]
+    P --> Q[Consent + access confirmed]
+    Q --> S[Scout: investigate]
+    S --> R[Recon: reproduce]
+    R --> V{Serious or uncertain?}
+    V -->|Yes| T[Verifier: challenge]
+    V -->|No| E[Private report]
+    T --> E
+```
 
-## Domain ownership before live testing
+## What it owns
+
+- **Permission:** exact HTTPS origins, request-specific DNS proof, consent and expiry. Redirects cannot widen scope.
+- **Work:** approved devices, queue capacity, bounded assignments, cancellation and retries. The agents stay on managed Kali machines.
+- **Evidence:** private findings, tool records, disagreements and report deletion. Admin activity counts cover the full history, without loading report bodies.
+
+**Core** owns accounts, NEAR Intents checkout and accounting. **Relay** runs beside Hermes and enforces access to tools and model inference. The optional NEAR AI report check reviews consistency and returns a signed receipt; it does not certify a finding as true.
+
+## What customers see
+
+A URL, domain verification, the named team, progress and a downloadable report. New live reviews require Scout and Recon; the reserved third reviewer joins when the evidence warrants it. Existing reviews keep their saved rules.
+
+This repository is private while we develop the service. That is a development choice, not a security boundary: authenticated calls, exact scope checks and isolation protect the running system. Customer data and secrets are never repository content.
+
+## Operating reference
+
+> **DON’T TRUST! VERIFY!** Review the implementation and test its permission checks before using your own deployment. Model confidence and signed reports do not prove a finding.
+
+The details below are for deploying and inspecting the service. Public machines cannot join the managed beta. Approved operators handle assigned data outside the model’s TEE; do not describe the whole workflow as confidential computing.
+
+<details>
+<summary>Domain ownership before live testing</summary>
 
 A saved live-test scope gets a fresh DNS TXT challenge for each exact domain. The challenge belongs to the requester and immutable scope. **Refresh DNS** starts a persisted five-minute check; repeated clicks do not extend it. Six windows per request are allowed. The worker checks at most eight due records per pass, four concurrently, with a four-second lookup timeout and a thirty-second retry interval.
 
@@ -17,7 +47,10 @@ Every domain must verify before the request automatically becomes eligible for c
 
 The verifier uses the host’s DNS resolver. Permit DNS egress and configure a trusted resolver for the deployment. It looks up the exact `_patchriot.<domain>.` TXT name, combines chunks within one record, and requires an exact token match. Missing records, DNS failures and late replies never grant access. DNS control does not prove legal authority over everything reachable through a domain; staff still review scope and authorization.
 
-## Staff tests of owned sites
+</details>
+
+<details>
+<summary>Staff tests of owned sites</summary>
 
 By default every live test needs DNS proof. For development, set `PATCHRIOT_OWNED_TEST_ORIGINS` to a JSON array of exact HTTPS origins you own or have explicit permission to test, for example `["https://staging.example.com"]`. Wildcards, paths, duplicate entries and implicit subdomains are refused. Keep this list short and remove it after testing.
 
@@ -25,9 +58,12 @@ A signed-in administrator can then open the request and choose **Staff: authoriz
 
 Removing the configuration stops new grants. Revoke an existing request through its normal decision endpoint to stop waiting/running work and evidence access. An expired or revoked grant cannot be revived. Neither the agent gateway nor a member account can issue these grants. Deploy dispatcher and gateway with migration 22 before updating core.
 
-## Developer setup: run your own dispatcher
+</details>
 
-These instructions start a local installation. The hosted beta address will be published in core's README; the current deployment is a private pilot.
+<details>
+<summary>Developer setup: run your own dispatcher</summary>
+
+These instructions start a separate local installation. To request a website assessment, use the hosted beta at [patchriot.tech](https://patchriot.tech).
 
 Keep `patchriot-core` beside this repository for the Apache-2.0 protocol crate. Use **Rust 1.94.1** and a dedicated **PostgreSQL 17** database.
 
@@ -48,7 +84,10 @@ cargo run --locked
 
 Migrations are embedded. Use HTTPS or an authenticated tunnel outside loopback. Internal requests require the service secret plus account/role headers **constructed by core from its session**, never copied from a browser.
 
-## Connect agents over Tailscale
+</details>
+
+<details>
+<summary>Connect agents over Tailscale</summary>
 
 The website can stay on its public HTTPS address. Agent machines join a private tailnet and reach a separate **agent-only gateway**. Core continues using the internal listener. Use a dedicated deployment and database for each private organization; this is a manual setup path, not hosted tenant isolation. The commands below assume core and dispatcher share a service host or network namespace. Separate hosts need their own private internal connection; an agent gateway does not expose core's internal API.
 
@@ -74,7 +113,10 @@ The relay signs the same requests as before. Tailnet membership does not approve
 
 Leaving `PATCHRIOT_RELAY_BIND` unset preserves the existing local/internal setup. Network credentials belong in Tailscale's private machine state, never the repo, browser or model container. The example policy is a starting configuration; validate it against the actual tailnet before connecting operators.
 
-## What coordinates the agents?
+</details>
+
+<details>
+<summary>What coordinates the agents?</summary>
 
 **Rust schedules the work.** There is no lead Hermes agent in the dispatcher. Code checks permissions, records the agreed team and assigns investigator, reproducer and challenger roles. Workers use Hermes through the relay’s isolated adapter: local models for offline modes, or the explicitly configured hosted provider for live HTTP tests.
 
@@ -103,7 +145,10 @@ Install the unit in `/etc/systemd/system`, run `systemctl daemon-reload`, then `
 
 </details>
 
-## Device lifecycle
+</details>
+
+<details>
+<summary>Device lifecycle</summary>
 
 **Pair → claim → manual approval → contribute → pause or revoke.**
 
@@ -115,7 +160,10 @@ Approval must assess an operator and their agent's security-review, reproduction
 
 The private device list includes `reports_received`, derived from completed leases with a saved result. A repeated delivery counts once; active, cancelled and expired assignments do not count. An accepted report can still contain incomplete or conflicting evidence. Counts are activity, not verified findings or earnings. Members receive counts only for their own devices; admins can see the fleet, without request contents in the list.
 
-## Review workflow
+</details>
+
+<details>
+<summary>Review workflow</summary>
 
 **Report retention:** core sends an authenticated `POST /internal/reviews/:id/download` with `{}` when a user explicitly exports a finished report. The first requester export sets a fixed twelve-hour deadline. Replays preserve it; staff exports and ordinary reads do not start it. After expiry all private report reads omit findings and evidence, and the existing 30-second cleanup task removes results and progress even with no browser/device traffic. A small work receipt keeps execution counts, model, scope/snapshot hash and completion metadata for payment accounting. Permission, job and payment records stay intact. Delivery retries cannot restore deleted results. Migration 23 applies the clock only after an explicit export, including older saved reports. PDFs/Markdown are browser-generated and have no separate stored copy. Operators must set their database backup/recovery retention separately; application deletion does not erase historical backups.
 
@@ -149,7 +197,10 @@ Renewal requires a signed, increasing sequence, a current assignment and fresh, 
 
 All three checks must report the expected results to complete. Agent prose alone cannot pass: the result needs the original/fixed terminal observations, model-call count and confirmed cleanup. Missing or contradictory evidence produces **needs_review**. Cancellation and revocation reject late results; superseded attempts cannot complete replacements. Expiry is processed during polling and authorized queue reads. Shared-host/operator identities remain visible; model names and digests are declarations, not attestations.
 
-## API map
+</details>
+
+<details>
+<summary>API map</summary>
 
 | Route group | Caller |
 | --- | --- |
@@ -179,7 +230,10 @@ After recording a matching settlement, core calls `fund` with `request_id`, `inv
 
 These routes require the internal service credential and paying account. They do not accept a browser's payment claim or verify a blockchain transaction themselves. Core's configured paid mode restricts the free path and handles browser checkout, quote preparation and funding-event delivery. Refund execution remains separate.
 
-## Boundaries that matter
+</details>
+
+<details>
+<summary>Access and scope checks</summary>
 
 ### Website evidence collector
 
@@ -227,7 +281,10 @@ The [Rust client](src/screening.rs) uses OpenRouter's [decisions API](https://op
 
 Google login and stronger patcher/admin authentication belong in core. Broader customer artifacts and recurring checks follow. Recurring jobs must recheck scope, funds and capacity on every occurrence; missed runs must not create a burst.
 
-## Verify it
+</details>
+
+<details>
+<summary>Verify it</summary>
 
 GitHub checks run when a ready PR targets `main` and when that PR changes. Draft PRs and ordinary branch pushes do not run checks; newer PR commits cancel superseded runs. Run the commands below locally while developing.
 
@@ -245,7 +302,10 @@ Private core access in CI needs a `READ_TOKEN` Actions secret with read-only acc
 
 This repository is private initially while admission and review policy evolve; secrecy is not a security boundary. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-## Private source uploads
+</details>
+
+<details>
+<summary>Private source uploads</summary>
 
 Core sends bounded text to `/internal/sources`: 1–12 UTF-8 files, at most 16 KiB each and 48 KiB total. Files are stored as JSON in PostgreSQL; names are never opened or extracted as paths. Intake rejects archives, binaries, hidden/unsafe paths and common credential markers. These checks do not replace removing secrets before upload.
 
@@ -255,7 +315,10 @@ Only a live assigned lease can read `/v1/devices/:id/work/source-evidence`. The 
 
 Raw bundles expire after seven days. Owner deletion cancels unfinished reviews and removes raw files; metadata, decisions and reports remain. The periodic collector and queue cleanup remove expired bytes. Revocation stops further reads, renewals and results, but cannot recall data already seen. Intake caps are five retained uploads and 20 daily submissions per owner, with 200 retained globally.
 
-## Live website pilot
+</details>
+
+<details>
+<summary>Live website pilot</summary>
 
 Core can reserve a live assessment through `POST /internal/pentests/:id/admit-review`. It stays `awaiting_payment` until core confirms the matching settlement. Admission requires domain proof, scope approval, the named team and separate provider consent. Funding rechecks permission and team availability; it cannot extend an expired scope or restart cancelled work. Coupons use the existing idempotent start after core reserves the code.
 
@@ -267,7 +330,10 @@ Roles stay pinned and run sequentially. Only their active device lease can downl
 
 The relay restricts target requests to approved HTTPS origins and public IPs, records HTTP evidence, and keeps the hosted-provider key outside the agent container. The dispatcher validates report bounds, scope and cited evidence IDs. `evidence_complete` means the required report material arrived; it does not prove a vulnerability or certify operator honesty. Missing or conflicting evidence still needs review. Returned live reports retain bounded excerpts in private history.
 
-## Container deployment
+</details>
+
+<details>
+<summary>Container deployment</summary>
 
 The dispatcher image needs the shared protocol crate from a matching core checkout. Create a small build context outside both repositories:
 
@@ -338,3 +404,5 @@ Missing `review_policy` keeps the original three-role behavior, including existi
 `PATCHRIOT_VENICE_FALLBACK_ENABLED=true` offers the fixed DeepSeek V4.1 Flash 1017 Uncensored backup at checkout. Default: off. Enable it only after the managed NEAR relays have `venice_fallback_key_file` configured and all services use the matching protocol.
 
 New consent saves `allows_venice_fallback`; it cannot be changed by replaying the request or payment. Old requests keep their original provider restriction. The gateway rejects a fallback receipt without that saved permission. Relays handle transient failures, call accounting and cost limits; this setting does not weaken target ownership, scope or model-signature checks. No database migration is required.
+
+</details>

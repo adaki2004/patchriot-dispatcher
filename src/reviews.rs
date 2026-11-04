@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 pub(crate) mod funding;
 pub(crate) mod pentests;
+pub(crate) mod retention;
 pub(crate) mod sources;
 pub(crate) mod websites;
 
@@ -29,9 +30,10 @@ pub(crate) async fn scheduler(tx: &mut Tx<'_>) -> Result<(), ApiError> {
 }
 
 pub(crate) async fn sweep(tx: &mut Tx<'_>) -> Result<(), ApiError> {
+    retention::purge(tx).await?;
     crate::sources::sweep(tx).await?;
     sqlx::query("UPDATE reviews r SET state='failed' WHERE r.mode='pentest_agent' AND r.state IN ('awaiting_payment','queued','running') AND r.pentest_context->'scope'->>'authentication' IS NOT NULL AND NOT EXISTS(SELECT 1 FROM pentest_credentials c WHERE c.pentest_id=r.pentest_id AND c.expires_at>now())").execute(&mut **tx).await?;
-    sqlx::query("UPDATE reviews r SET state = 'failed' WHERE r.mode = 'pentest_agent' AND r.state IN ('queued','running') AND (EXISTS (SELECT 1 FROM review_steps s JOIN devices d ON d.id = s.assigned_device_id WHERE s.review_id = r.id AND (d.approval <> 'approved' OR NOT d.private_work_approved)) OR NOT EXISTS (SELECT 1 FROM pentests p WHERE p.id = r.pentest_id AND p.state = 'approved' AND p.ownership_verified_at IS NOT NULL AND p.expires_at > now()))")
+    sqlx::query("UPDATE reviews r SET state = 'failed' WHERE r.mode = 'pentest_agent' AND r.state IN ('queued','running') AND (EXISTS (SELECT 1 FROM review_steps s JOIN devices d ON d.id = s.assigned_device_id WHERE s.review_id = r.id AND (d.approval <> 'approved' OR NOT d.private_work_approved)) OR NOT EXISTS (SELECT 1 FROM pentests p WHERE p.id = r.pentest_id AND p.state = 'approved' AND (p.ownership_verified_at IS NOT NULL OR p.staff_authorized_at IS NOT NULL) AND p.expires_at > now()))")
         .execute(&mut **tx).await?;
     sqlx::query("UPDATE reviews r SET state = 'failed' WHERE r.mode = 'source_agent' AND r.state IN ('awaiting_payment','queued','running') AND (EXISTS (SELECT 1 FROM review_steps s JOIN devices d ON d.id = s.assigned_device_id WHERE s.review_id = r.id AND (d.approval <> 'approved' OR NOT d.private_work_approved)) OR NOT EXISTS (SELECT 1 FROM source_uploads u WHERE u.id = r.source_id AND u.state = 'approved' AND u.bundle IS NOT NULL AND u.expires_at > now()))")
         .execute(&mut **tx).await?;
@@ -76,6 +78,9 @@ struct ReviewRow {
     created_at: DateTime<Utc>,
     deadline_at: DateTime<Utc>,
     agent_attempt_seconds: i32,
+    per_role_timing: bool,
+    first_downloaded_at: Option<DateTime<Utc>>,
+    report_expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(FromRow)]
@@ -91,6 +96,7 @@ struct StepRow {
     fixture_matches: Option<bool>,
     evidence_complete: Option<bool>,
     live_progress: Option<DbJson<patchriot_protocol::pentests::LiveProgressView>>,
+    work_receipt: Option<DbJson<patchriot_protocol::reports::WorkReceipt>>,
 }
 
 fn role(value: &str) -> Result<ReviewRole, ApiError> {
@@ -104,13 +110,31 @@ async fn views(
     caller: &Actor,
     id: Option<Uuid>,
 ) -> Result<Vec<ReviewView>, ApiError> {
-    let reviews = sqlx::query_as::<_, ReviewRow>("SELECT id, request_id, state, mode, scenario, website_context, source_context, pentest_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds FROM reviews WHERE (requester_id = $1 OR $2) AND ($3::uuid IS NULL OR id = $3) ORDER BY created_at DESC LIMIT 50")
+    let reviews = sqlx::query_as::<_, ReviewRow>("SELECT id, request_id, state, mode, scenario, website_context, source_context, pentest_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds, per_role_timing, first_downloaded_at, report_expires_at FROM reviews WHERE (requester_id = $1 OR $2) AND ($3::uuid IS NULL OR id = $3) ORDER BY created_at DESC LIMIT 50")
         .bind(caller.id).bind(caller.admin).bind(id).fetch_all(pool).await?;
     let ids: Vec<_> = reviews.iter().map(|r| r.id).collect();
-    let steps = sqlx::query_as::<_, StepRow>("SELECT s.review_id, s.role, s.state, s.attempts, l.device_id, l.operator_id, l.compute_group, CASE WHEN $2 THEN s.result ELSE NULL END AS result, s.fixture_matches, s.evidence_complete, l.live_progress FROM review_steps s LEFT JOIN work_leases l ON l.id = s.current_lease_id WHERE s.review_id = ANY($1) ORDER BY s.position")
+    let steps = sqlx::query_as::<_, StepRow>("SELECT s.review_id, s.role, s.state, s.attempts, l.device_id, l.operator_id, l.compute_group, CASE WHEN $2 AND (r.report_expires_at IS NULL OR r.report_expires_at>now()) THEN s.result ELSE NULL END AS result, s.fixture_matches, s.evidence_complete, CASE WHEN r.report_expires_at IS NULL OR r.report_expires_at>now() THEN l.live_progress ELSE NULL END AS live_progress, CASE WHEN $2 THEN s.work_receipt ELSE NULL END AS work_receipt FROM review_steps s JOIN reviews r ON r.id=s.review_id LEFT JOIN work_leases l ON l.id = s.current_lease_id WHERE s.review_id = ANY($1) ORDER BY s.position")
         .bind(&ids).bind(id.is_some()).fetch_all(pool).await?;
     let mut result = Vec::new();
     for review in reviews {
+        let timing = if review.per_role_timing && id.is_some() {
+            let (started, active): (Option<DateTime<Utc>>, Option<DateTime<Utc>>) = sqlx::query_as("SELECT min(l.created_at), max(l.deadline_at) FILTER (WHERE l.state='active') FROM work_leases l JOIN review_steps s ON s.id=l.step_id WHERE s.review_id=$1")
+                .bind(review.id).fetch_one(pool).await?;
+            let ahead: i64 = if matches!(review.state.as_str(), "queued" | "running") {
+                sqlx::query_scalar("SELECT count(*) FROM reviews earlier WHERE earlier.mode='pentest_agent' AND earlier.state IN ('queued','running') AND (COALESCE(earlier.funded_at,earlier.created_at),earlier.id)<($2,$1) AND EXISTS(SELECT 1 FROM review_steps mine JOIN devices md ON md.id=mine.assigned_device_id JOIN review_steps other ON other.review_id=earlier.id JOIN devices od ON od.id=other.assigned_device_id WHERE mine.review_id=$1 AND mine.state IN ('queued','leased') AND other.state IN ('queued','leased') AND md.operator_id=od.operator_id AND md.introduction->>'compute_group'=od.introduction->>'compute_group')")
+                    .bind(review.id).bind(review.funded_at.unwrap_or(review.created_at)).fetch_one(pool).await?
+            } else {
+                0
+            };
+            Some(ReviewTiming {
+                role_limit_seconds: review.agent_attempt_seconds as u64,
+                started_at: started.map(|t| t.timestamp()),
+                active_role_deadline_at: active.map(|t| t.timestamp()),
+                requests_ahead: ahead as u32,
+            })
+        } else {
+            None
+        };
         let mut parts = Vec::new();
         for step in steps.iter().filter(|s| s.review_id == review.id) {
             parts.push(ReviewStepView {
@@ -124,6 +148,7 @@ async fn views(
                 fixture_matches: step.fixture_matches,
                 evidence_complete: step.evidence_complete,
                 progress: step.live_progress.as_ref().map(|p| p.0.clone()),
+                receipt: step.work_receipt.as_ref().map(|r| r.0.clone()),
             });
         }
         result.push(ReviewView {
@@ -145,6 +170,17 @@ async fn views(
             state: review.state,
             created_at: review.created_at.timestamp(),
             deadline_at: review.deadline_at.timestamp(),
+            timing,
+            retention: review
+                .first_downloaded_at
+                .zip(review.report_expires_at)
+                .map(
+                    |(first, expires)| patchriot_protocol::reports::ReportRetention {
+                        first_downloaded_at: first.timestamp(),
+                        expires_at: expires.timestamp(),
+                        content_deleted: expires <= Utc::now(),
+                    },
+                ),
             steps: parts,
             website: review.website_context.map(|context| context.0),
             source: review.source_context.map(|context| context.0),
@@ -362,6 +398,43 @@ impl AssignmentRow {
     }
 }
 
+/// Choose across the shared machine, not just the device that polled first.
+/// An unavailable pinned worker does not stall unrelated ready work. This
+/// chooses no substitute operator and the existing compute lease stays the
+/// final guard against running two tasks on the same declared machine.
+async fn next_live_step(
+    tx: &mut Tx<'_>,
+    id: Uuid,
+    device: &Worker,
+    tools: &[patchriot_protocol::pentests::LiveToolProfile],
+) -> Result<Option<Uuid>, ApiError> {
+    let next: Option<(Uuid, Uuid)> = sqlx::query_as(r#"
+        SELECT s.id, d.id FROM review_steps s
+        JOIN reviews r ON r.id=s.review_id
+        JOIN devices d ON d.id=s.assigned_device_id
+        WHERE r.mode='pentest_agent' AND r.state IN ('queued','running')
+          AND s.state='queued' AND r.deadline_at>now()
+          AND d.operator_id=$2 AND d.introduction->>'compute_group'=$3
+          AND d.approval='approved' AND d.private_work_approved AND NOT d.paused
+          AND d.last_seen_at>now()-interval '30 seconds'
+          AND d.introduction->>'runtime'='hermes'
+          AND d.introduction->>'declared_model'=ANY($5)
+          AND (d.id=$1 OR (d.live_tests AND d.work_polled_at>now()-interval '30 seconds'))
+          AND (CASE WHEN d.id=$1 THEN $4::jsonb ELSE d.live_tools END)
+              @> COALESCE(r.pentest_context->'scope'->'tools','[]'::jsonb)
+          AND NOT EXISTS(SELECT 1 FROM review_steps previous
+              WHERE previous.review_id=r.id AND previous.position<s.position AND previous.state<>'completed')
+          AND NOT EXISTS(SELECT 1 FROM review_steps used JOIN work_leases l ON l.id=used.current_lease_id
+              WHERE used.review_id=r.id AND used.state='completed' AND l.device_id=d.id)
+        ORDER BY COALESCE(r.funded_at,r.created_at), r.id, s.position
+        LIMIT 1 FOR UPDATE OF s
+    "#).bind(id).bind(device.operator_id).bind(&device.introduction.compute_group)
+        .bind(DbJson(tools)).bind(&patchriot_protocol::pentests::LiveProvider::MODELS[..]).fetch_optional(&mut **tx).await?;
+    Ok(next
+        .filter(|(_, assigned)| *assigned == id)
+        .map(|(step, _)| step))
+}
+
 pub async fn poll(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -372,7 +445,7 @@ pub async fn poll(
     if seq == 0 || seq > i64::MAX as u64 {
         return Err(ApiError::bad("invalid_sequence"));
     }
-    if request.payload.live_tools.len() > 3
+    if request.payload.live_tools.len() > 4
         || request
             .payload
             .live_tools
@@ -400,7 +473,12 @@ pub async fn poll(
         return Err(ApiError::bad("website_reviews_require_agent"));
     }
     if request.payload.live_tests
-        && device.introduction.declared_model.as_deref() != Some("abliterated-model-large-v2")
+        && device
+            .introduction
+            .declared_model
+            .as_deref()
+            .and_then(patchriot_protocol::pentests::LiveProvider::from_model)
+            .is_none()
     {
         return Err(ApiError::bad("live_model_not_supported"));
     }
@@ -463,10 +541,15 @@ pub async fn poll(
             let busy: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM work_leases WHERE compute_group = $1 AND operator_id = $2 AND state = 'active')")
                 .bind(&device.introduction.compute_group).bind(device.operator_id).fetch_one(&mut *tx).await?;
             if !busy {
+                let next_live = if modes.contains(&"pentest_agent") {
+                    next_live_step(&mut tx, id, &device, &request.payload.live_tools).await?
+                } else {
+                    None
+                };
                 // Three distinct devices, sequential roles, and one shared-compute
                 // slot. Actual operator independence is reported, never assumed.
-                let step: Option<(Uuid, Uuid, String, i32)> = sqlx::query_as("SELECT s.id, s.review_id, r.mode, r.agent_attempt_seconds FROM review_steps s JOIN reviews r ON r.id = s.review_id WHERE s.state = 'queued' AND r.state IN ('queued','running') AND r.mode = ANY($2) AND (r.mode <> 'pentest_agent' OR $3::jsonb @> COALESCE(r.pentest_context->'scope'->'tools', '[]'::jsonb)) AND (s.assigned_device_id IS NULL OR s.assigned_device_id = $1) AND r.deadline_at > now() AND NOT EXISTS (SELECT 1 FROM review_steps previous WHERE previous.review_id = r.id AND previous.position < s.position AND previous.state <> 'completed') AND NOT EXISTS (SELECT 1 FROM review_steps used JOIN work_leases l ON l.id = used.current_lease_id WHERE used.review_id = r.id AND used.state = 'completed' AND l.device_id = $1) ORDER BY r.created_at, s.position LIMIT 1 FOR UPDATE OF s")
-                    .bind(id).bind(&modes).bind(DbJson(&request.payload.live_tools)).fetch_optional(&mut *tx).await?;
+                let step: Option<(Uuid, Uuid, String, i32)> = sqlx::query_as("SELECT s.id, s.review_id, r.mode, r.agent_attempt_seconds FROM review_steps s JOIN reviews r ON r.id = s.review_id WHERE s.state = 'queued' AND r.state IN ('queued','running') AND r.mode = ANY($2) AND (r.mode <> 'pentest_agent' OR s.id=$4) AND (r.mode <> 'pentest_agent' OR $3::jsonb @> COALESCE(r.pentest_context->'scope'->'tools', '[]'::jsonb)) AND (s.assigned_device_id IS NULL OR s.assigned_device_id = $1) AND r.deadline_at > now() AND NOT EXISTS (SELECT 1 FROM review_steps previous WHERE previous.review_id = r.id AND previous.position < s.position AND previous.state <> 'completed') AND NOT EXISTS (SELECT 1 FROM review_steps used JOIN work_leases l ON l.id = used.current_lease_id WHERE used.review_id = r.id AND used.state = 'completed' AND l.device_id = $1) ORDER BY r.created_at, s.position LIMIT 1 FOR UPDATE OF s")
+                    .bind(id).bind(&modes).bind(DbJson(&request.payload.live_tools)).bind(next_live).fetch_optional(&mut *tx).await?;
                 if let Some((step_id, review_id, mode, attempt_seconds)) = step {
                     let lease = Uuid::new_v4();
                     let seconds = if mode != "owned_fixture" {
@@ -506,6 +589,7 @@ pub async fn poll(
 #[derive(FromRow)]
 struct LeaseRow {
     step_id: Uuid,
+    role: String,
     device_id: Uuid,
     review_id: Uuid,
     state: String,
@@ -520,7 +604,7 @@ struct LeaseRow {
 }
 
 async fn lease(tx: &mut Tx<'_>, id: Uuid) -> Result<LeaseRow, ApiError> {
-    sqlx::query_as::<_, LeaseRow>("SELECT l.step_id, l.device_id, s.review_id, l.state, l.expires_at, LEAST(l.deadline_at, r.deadline_at) AS deadline_at, l.renewal_sequence, r.mode, l.result_hash, l.fixture_matches, l.evidence_complete, s.current_lease_id FROM work_leases l JOIN review_steps s ON s.id = l.step_id JOIN reviews r ON r.id = s.review_id WHERE l.id = $1 FOR UPDATE OF l, s")
+    sqlx::query_as::<_, LeaseRow>("SELECT l.step_id, s.role, l.device_id, s.review_id, l.state, l.expires_at, LEAST(l.deadline_at, r.deadline_at) AS deadline_at, l.renewal_sequence, r.mode, l.result_hash, l.fixture_matches, l.evidence_complete, s.current_lease_id FROM work_leases l JOIN review_steps s ON s.id = l.step_id JOIN reviews r ON r.id = s.review_id WHERE l.id = $1 FOR UPDATE OF l, s")
         .bind(id).fetch_optional(&mut **tx).await?.ok_or_else(ApiError::missing)
 }
 
@@ -718,14 +802,18 @@ pub async fn complete(
         {
             return Err(ApiError::bad("invalid_live_evidence"));
         }
-        (None, Some(result.evidence_complete(&context.scope)))
+        (
+            None,
+            Some(result.evidence_complete_for_role(&context.scope, role(&lease.role)?)),
+        )
     } else {
         (Some(input.result.matches_fixture()), None)
     };
     sqlx::query("UPDATE work_leases SET state = 'completed', result_hash = $1, fixture_matches = $2, evidence_complete = $4 WHERE id = $3")
         .bind(hash).bind(matches).bind(input.lease_id).bind(evidence_complete).execute(&mut *tx).await?;
-    sqlx::query("UPDATE review_steps SET state = 'completed', result = $1, fixture_matches = $2, evidence_complete = $4 WHERE id = $3")
-        .bind(DbJson(input.result)).bind(matches).bind(lease.step_id).bind(evidence_complete).execute(&mut *tx).await?;
+    let receipt = patchriot_protocol::reports::WorkReceipt::from_result(&input.result).map(DbJson);
+    sqlx::query("UPDATE review_steps SET state = 'completed', result = $1, fixture_matches = $2, evidence_complete = $4, work_receipt=$5 WHERE id = $3")
+        .bind(DbJson(input.result)).bind(matches).bind(lease.step_id).bind(evidence_complete).bind(receipt).execute(&mut *tx).await?;
     sqlx::query("UPDATE reviews SET state = CASE WHEN (SELECT bool_and(CASE WHEN reviews.mode IN ('website_agent','source_agent','pentest_agent') THEN evidence_complete ELSE fixture_matches END) FROM review_steps WHERE review_id = $1) THEN 'completed' ELSE 'needs_review' END WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM review_steps WHERE review_id = $1 AND state <> 'completed')")
         .bind(lease.review_id).execute(&mut *tx).await?;
     tx.commit().await?;

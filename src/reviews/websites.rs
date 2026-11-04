@@ -47,8 +47,8 @@ pub(super) async fn eligible_with_tools(
     // for this task, separately from staff approval and requester consent.
     // Presence-only restarts must not retain work availability forever. Busy
     // agents renew a live lease instead of polling while they execute a task.
-    let rows = sqlx::query_as::<_, Candidate>("SELECT d.id, d.operator_id, o.display_name AS operator_name, d.introduction, COALESCE(q.pending,0) AS pending_roles, EXISTS (SELECT 1 FROM work_leases busy WHERE busy.device_id = d.id AND busy.state = 'active' AND busy.expires_at > now() AND busy.deadline_at > now()) AS busy FROM devices d JOIN operators o ON o.id = d.operator_id LEFT JOIN (SELECT s.assigned_device_id, count(*) AS pending FROM review_steps s JOIN reviews r ON r.id = s.review_id WHERE r.state IN ('awaiting_payment','queued','running') AND s.state IN ('queued','leased') GROUP BY s.assigned_device_id) q ON q.assigned_device_id = d.id WHERE d.approval = 'approved' AND d.private_work_approved AND (CASE $2 WHEN 'source_agent' THEN d.source_reviews WHEN 'pentest_agent' THEN d.live_tests ELSE d.website_reviews END) AND NOT d.paused AND d.last_seen_at > now() - interval '30 seconds' AND (d.work_polled_at > now() - interval '30 seconds' OR EXISTS (SELECT 1 FROM work_leases l WHERE l.device_id = d.id AND l.state = 'active' AND l.expires_at > now() AND l.deadline_at > now())) AND d.introduction->>'runtime' = 'hermes' AND ($2 <> 'pentest_agent' OR d.introduction->>'declared_model' = 'abliterated-model-large-v2') AND d.live_tools @> $3::jsonb AND ($1::uuid[] IS NULL OR d.id = ANY($1)) ORDER BY d.created_at, d.id LIMIT 200 FOR UPDATE OF d")
-        .bind(ids).bind(mode.as_str()).bind(DbJson(tools)).fetch_all(&mut **tx).await?;
+    let rows = sqlx::query_as::<_, Candidate>("SELECT d.id, d.operator_id, o.display_name AS operator_name, d.introduction, COALESCE(q.pending,0) AS pending_roles, EXISTS (SELECT 1 FROM work_leases busy WHERE busy.device_id = d.id AND busy.state = 'active' AND busy.expires_at > now() AND busy.deadline_at > now()) AS busy FROM devices d JOIN operators o ON o.id = d.operator_id LEFT JOIN (SELECT s.assigned_device_id, count(*) AS pending FROM review_steps s JOIN reviews r ON r.id = s.review_id WHERE r.state IN ('awaiting_payment','queued','running') AND s.state IN ('queued','leased') GROUP BY s.assigned_device_id) q ON q.assigned_device_id = d.id WHERE d.approval = 'approved' AND d.private_work_approved AND (CASE $2 WHEN 'source_agent' THEN d.source_reviews WHEN 'pentest_agent' THEN d.live_tests ELSE d.website_reviews END) AND NOT d.paused AND d.last_seen_at > now() - interval '30 seconds' AND (d.work_polled_at > now() - interval '30 seconds' OR EXISTS (SELECT 1 FROM work_leases l WHERE l.device_id = d.id AND l.state = 'active' AND l.expires_at > now() AND l.deadline_at > now())) AND d.introduction->>'runtime' = 'hermes' AND ($2 <> 'pentest_agent' OR d.introduction->>'declared_model' = ANY($4)) AND d.live_tools @> $3::jsonb AND ($1::uuid[] IS NULL OR d.id = ANY($1)) ORDER BY d.created_at, d.id LIMIT 200 FOR UPDATE OF d")
+        .bind(ids).bind(mode.as_str()).bind(DbJson(tools)).bind(&patchriot_protocol::pentests::LiveProvider::MODELS[..]).fetch_all(&mut **tx).await?;
     Ok(rows)
 }
 
@@ -61,6 +61,22 @@ pub(super) async fn candidates(
         .into_iter()
         .map(Candidate::disclosure)
         .collect())
+}
+
+fn model_family(model: &str) -> String {
+    if matches!(
+        patchriot_protocol::pentests::LiveProvider::from_model(model),
+        Some(
+            patchriot_protocol::pentests::LiveProvider::Abliteration
+                | patchriot_protocol::pentests::LiveProvider::Venice
+        )
+    ) {
+        patchriot_protocol::pentests::LiveProvider::Abliteration
+            .model()
+            .into()
+    } else {
+        model.to_lowercase()
+    }
 }
 
 pub(super) fn recommend(candidates: &[Candidate], site: Uuid) -> Vec<Uuid> {
@@ -77,7 +93,7 @@ pub(super) fn recommend(candidates: &[Candidate], site: Uuid) -> Vec<Uuid> {
             .filter(|candidate| !chosen.iter().any(|selected| selected.id == candidate.id))
             .min_by_key(|candidate| {
                 let intro = &candidate.introduction;
-                let model = intro.declared_model.as_deref().unwrap_or("").to_lowercase();
+                let model = model_family(intro.declared_model.as_deref().unwrap_or(""));
                 let same_operator = chosen
                     .iter()
                     .any(|other| other.operator_id == candidate.operator_id);
@@ -87,12 +103,7 @@ pub(super) fn recommend(candidates: &[Candidate], site: Uuid) -> Vec<Uuid> {
                 });
                 let same_model = model.is_empty()
                     || chosen.iter().any(|other| {
-                        other
-                            .introduction
-                            .declared_model
-                            .as_deref()
-                            .unwrap_or("")
-                            .to_lowercase()
+                        model_family(other.introduction.declared_model.as_deref().unwrap_or(""))
                             == model
                     });
                 let mut tie = Sha256::new();
@@ -174,7 +185,7 @@ pub(super) async fn create_review(
     scheduler(&mut tx).await?;
     sweep(&mut tx).await?;
     let existing: Option<ReviewRow> = sqlx::query_as(
-        "SELECT id, request_id, state, mode, scenario, website_context, source_context, pentest_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds FROM reviews WHERE requester_id = $1 AND request_id = $2",
+        "SELECT id, request_id, state, mode, scenario, website_context, source_context, pentest_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds, per_role_timing, first_downloaded_at, report_expires_at FROM reviews WHERE requester_id = $1 AND request_id = $2",
     )
     .bind(caller.id)
     .bind(input.request_id)
@@ -398,6 +409,14 @@ mod selection_tests {
 
     #[test]
     fn declared_models_and_machines_are_preferences_not_attestations() {
+        assert_eq!(
+            model_family("abliterated-model-large-v2"),
+            model_family("abliteration-abliterated-model-large-v2")
+        );
+        assert_ne!(
+            model_family("abliterated-model-large-v2"),
+            model_family("other-model")
+        );
         let pool = vec![
             candidate(1, 10, "host-a", "model-a", 0),
             candidate(2, 10, "host-a", "model-a", 0),

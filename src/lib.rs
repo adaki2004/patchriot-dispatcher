@@ -4,6 +4,7 @@ mod credentials;
 mod devices;
 pub use credentials::run_cleanup;
 pub mod ownership;
+pub mod report_checks;
 mod reviews;
 pub mod screening;
 mod sources;
@@ -31,6 +32,8 @@ pub struct AppState {
     pub audience: Arc<str>,
     agent_attempt_seconds: u64,
     credential_vault: Option<Arc<credentials::Vault>>,
+    owned_test_origins: Arc<[String]>,
+    near_check: Option<report_checks::NearCheck>,
 }
 
 impl AppState {
@@ -58,6 +61,8 @@ impl AppState {
             audience: audience.into(),
             agent_attempt_seconds: patchriot_protocol::DEFAULT_AGENT_ATTEMPT_SECONDS,
             credential_vault: None,
+            owned_test_origins: Arc::from([]),
+            near_check: None,
         })
     }
 
@@ -79,8 +84,35 @@ impl AppState {
         Ok(self)
     }
 
+    /// Off by default. Staff must still grant each exact request explicitly.
+    /// Removing this configuration disables new grants; revoke existing grants
+    /// through the normal scope decision endpoint to stop their active work.
+    pub fn with_owned_test_origins(mut self, origins: Vec<String>) -> Result<Self, &'static str> {
+        if origins.len() > 16 {
+            return Err("too many owned test origins");
+        }
+        for (index, origin) in origins.iter().enumerate() {
+            let parsed = patchriot_protocol::pentests::public_url(origin)?;
+            if parsed.origin().ascii_serialization() != *origin || origins[..index].contains(origin)
+            {
+                return Err("owned test origins must be distinct, exact HTTPS origins");
+            }
+        }
+        self.owned_test_origins = origins.into();
+        Ok(self)
+    }
+
     fn agent_review_seconds(&self) -> u64 {
         patchriot_protocol::agent_review_seconds(self.agent_attempt_seconds)
+    }
+
+    pub fn with_near_ai_key(mut self, key: Option<String>) -> Result<Self, &'static str> {
+        self.near_check = key.map(report_checks::NearCheck::new).transpose()?;
+        Ok(self)
+    }
+
+    pub fn report_checker(&self) -> Option<report_checks::NearCheck> {
+        self.near_check.clone()
     }
 }
 
@@ -159,6 +191,14 @@ pub fn router(state: AppState) -> Router {
             get(reviews::list).post(reviews::create),
         )
         .route("/internal/reviews/{id}", get(reviews::get))
+        .route(
+            "/internal/reviews/{id}/consistency-check",
+            get(report_checks::get).post(report_checks::request),
+        )
+        .route(
+            "/internal/reviews/{id}/download",
+            post(reviews::retention::download),
+        )
         .route("/internal/reviews/{id}/cancel", post(reviews::cancel))
         .route("/internal/reviews/{id}/fund", post(reviews::funding::fund))
         .route(
@@ -204,6 +244,14 @@ pub fn router(state: AppState) -> Router {
             get(reviews::pentests::list).post(reviews::pentests::create),
         )
         .route("/internal/pentest-tools", get(reviews::pentests::tools))
+        .route(
+            "/internal/pentests/{id}/credentials",
+            post(reviews::pentests::set_credentials),
+        )
+        .route(
+            "/internal/pentests/{id}/authorize-owned-test",
+            post(reviews::pentests::authorize_owned_test),
+        )
         .route(
             "/internal/pentests/{id}/decision",
             post(reviews::pentests::decide),

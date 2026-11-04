@@ -11,9 +11,17 @@ The Rust service that approves devices, queues reviews and assigns work to agent
 
 A saved live-test scope gets a fresh DNS TXT challenge for each exact domain. The challenge belongs to the requester and immutable scope. **Refresh DNS** starts a persisted five-minute check; repeated clicks do not extend it. Six windows per request are allowed. The worker checks at most eight due records per pass, four concurrently, with a four-second lookup timeout and a thirty-second retry interval.
 
-Every domain must verify before the request automatically becomes eligible for checkout. Verification creates no work and spends no money; only the requester can select the team and pay or redeem a coupon. Staff can still reject or revoke a scope. Migration 17 advances existing, unexpired, fully verified pending requests; blocked and incomplete requests remain unchanged. DNS proof and permission expire with the request after 24 hours. Scheduling, evidence access and renewal recheck the saved permission; expiry or revocation stops unfinished work. Proof never permits another account, another scope or arbitrary tools. Migration 13 also gives still-active older scopes fresh challenges; they do not bypass this gate.
+Every domain must verify before the request automatically becomes eligible for checkout. Verification creates no work and spends no money; only the requester can select the team and pay or redeem a coupon. Staff can still reject or revoke a scope. Migration 17 advances existing, unexpired, fully verified pending requests; blocked and incomplete requests remain unchanged. Migration 22 gives new requests up to seven days for DNS setup, with no lookup until the requester clicks Check DNS. Successful verification narrows the saved expiry to at most 24 hours. Older deadlines are not extended; repeated checks cannot extend a verified permission. Scheduling, evidence access and renewal recheck the saved permission; expiry or revocation stops unfinished work. Proof never permits another account, another scope or arbitrary tools. Migration 13 also gives still-active older scopes fresh challenges; they do not bypass this gate.
 
 The verifier uses the host’s DNS resolver. Permit DNS egress and configure a trusted resolver for the deployment. It looks up the exact `_patchriot.<domain>.` TXT name, combines chunks within one record, and requires an exact token match. Missing records, DNS failures and late replies never grant access. DNS control does not prove legal authority over everything reachable through a domain; staff still review scope and authorization.
+
+## Staff tests of owned sites
+
+By default every live test needs DNS proof. For development, set `PATCHRIOT_OWNED_TEST_ORIGINS` to a JSON array of exact HTTPS origins you own or have explicit permission to test, for example `["https://staging.example.com"]`. Wildcards, paths, duplicate entries and implicit subdomains are refused. Keep this list short and remove it after testing.
+
+A signed-in administrator can then open the request and choose **Staff: authorize our owned test site**, recording the owner's permission. Core forwards the write to `POST /internal/pentests/:id/authorize-owned-test` with the exact `scope_sha256` and a `note`. The database records the staff identity, time and note separately from DNS evidence. The request belongs to its original owner; consent, three approved agents, payment and all network restrictions still apply. No work is created by authorization. Repeating a grant preserves its original expiry, at most 24 hours. A changed scope needs a new request.
+
+Removing the configuration stops new grants. Revoke an existing request through its normal decision endpoint to stop waiting/running work and evidence access. An expired or revoked grant cannot be revived. Neither the agent gateway nor a member account can issue these grants. Deploy dispatcher and gateway with migration 22 before updating core.
 
 ## Developer setup: run your own dispatcher
 
@@ -30,6 +38,7 @@ Keep `patchriot-core` beside this repository for the Apache-2.0 protocol crate. 
 | `PATCHRIOT_RELAY_BIND` | Optional agent-only listener for Tailscale Serve, e.g. `127.0.0.1:7412`; requires both listeners on loopback |
 | `PATCHRIOT_AGENT_ATTEMPT_SECONDS` | Optional agent limit: `600` by default, at most `3600` |
 | `PATCHRIOT_JEV_OPENROUTER_KEY` | Optional server-only OpenRouter key for consented request screening |
+| `PATCHRIOT_NEAR_AI_KEY` | Optional server-only NEAR AI key for requester-approved report consistency checks |
 
 ```sh
 cargo run --locked
@@ -67,6 +76,18 @@ Leaving `PATCHRIOT_RELAY_BIND` unset preserves the existing local/internal setup
 
 **Rust schedules the work.** There is no lead Hermes agent in the dispatcher. Code checks permissions, records the agreed team and assigns investigator, reproducer and challenger roles. Workers use Hermes through the relay’s isolated adapter: local models for offline modes, or the explicitly configured hosted provider for live HTTP tests.
 
+### Optional NEAR AI report check
+
+With `PATCHRIOT_NEAR_AI_KEY` configured, the requester can ask for one advisory check of a finished live-test report. `POST /internal/reviews/:id/consistency-check` requires `{"accepts_near_ai":true}` and the requester's identity; staff cannot consent for someone else. `GET` returns its status and receipt to the requester or authorized staff. Migration 25 stores one durable attempt per report. Concurrent clicks reuse that attempt; interrupted or unverifiable completions are never purchased again automatically.
+
+The checker sends bounded finding excerpts and request metadata to `Qwen/Qwen3.8-27B-abliterated`. Raw HTTP captures, query values and stored login credentials are excluded; excerpts can still contain sensitive details. Advice can flag possible duplicates or claims needing review. It cannot alter original findings, approve work, access a target or move funds. Existing deterministic grouping remains the report's source of counts.
+
+The pinned [NEAR AI Rust SDK](https://docs.near.ai/cloud/inference-sdk/rust) checks fresh gateway/model attestation, requires UpToDate TCB status and GPU evidence, then verifies a provider-TEE signature over the exact request and response bytes. Gateway-only signatures, changed bytes and malformed advice are rejected. The downloadable receipt includes those bytes, hashes, signature and observed measurements. It does not include a portable hardware certificate chain or an audited source allowlist, identify a physical serving machine, attest the Kali agents or establish that findings are true. This integration uses verified HTTPS, not end-to-end encryption. See [response signatures and their limits](https://docs.near.ai/cloud/verification/cloud-api/response-signatures).
+
+Checks run one at a time with a three-minute timeout and up to 8,192 output tokens, including the model's reasoning. Truncated answers remain unverified even when their visible JSON is valid. The provider key stays in dispatcher, never the agent gateway, browser or relay. The receipt follows the report's fixed 12-hour deletion clock, including queued inputs and late responses. Deploy migration 25 before the matching core UI; no relay update is required for this feature.
+
+Live testing uses one discovery pass followed by targeted reproduction and review. With relay adapter 9, only Scout must run the requested ARTEX engine. Later roles still need their own request evidence, a usable assessment, confirmed cleanup and any required authenticated/anonymous access checks. The dispatcher takes the role from its saved assignment. An incomplete Scout leaves the overall review incomplete; a failed engine run from an older follow-up worker also stays incomplete. Deploy this dispatcher before upgrading the relay image. Existing scopes and saved reports keep their format.
+
 JEV is an optional, separate scope-screening call through OpenRouter. It receives only the consented scope and permission note, and cannot approve work or change tool permissions. Its decisions API is not interchangeable with a chat-completions model.
 
 A lower-cost model can later help clarify a request or summarize evidence. Select it using owned security-review examples, including false-positive checks and legitimate tasks it refuses. A model advertised as uncensored is not a capability or reliability guarantee. Keep actual authorization, tool limits and payment rules in code. Private material must not be sent to a different provider without the required disclosure and consent.
@@ -94,6 +115,10 @@ The private device list includes `reports_received`, derived from completed leas
 
 ## Review workflow
 
+**Report retention:** core sends an authenticated `POST /internal/reviews/:id/download` with `{}` when a user explicitly exports a finished report. The first requester export sets a fixed twelve-hour deadline. Replays preserve it; staff exports and ordinary reads do not start it. After expiry all private report reads omit findings and evidence, and the existing 30-second cleanup task removes results and progress even with no browser/device traffic. A small work receipt keeps execution counts, model, scope/snapshot hash and completion metadata for payment accounting. Permission, job and payment records stay intact. Delivery retries cannot restore deleted results. Migration 23 applies the clock only after an explicit export, including older saved reports. PDFs/Markdown are browser-generated and have no separate stored copy. Operators must set their database backup/recovery retention separately; application deletion does not erase historical backups.
+
+Live reports accept at most 4 MiB of compact JSON per role. The signed completion route adds a small envelope allowance; larger results are rejected before storage. Later roles can receive both preceding reports, and private detail reads can return all three. List responses contain no result bodies. Deploy core and dispatcher/gateway with these limits before upgrading relays; existing saved reports remain unchanged.
+
 ```mermaid
 flowchart LR
   Q[Admitted request] --> I[Investigator]
@@ -113,6 +138,10 @@ The current scenario, `access_control_v1`, is an owned access-control bug and su
 | Review lifetime, including waiting/retries | 15 minutes | Three attempt budgets + 5 minutes; 35 minutes by default |
 
 For a slow CPU pilot, `PATCHRIOT_AGENT_ATTEMPT_SECONDS=3600` permits 60 minutes per attempt and 185 minutes per review. The limit is saved at admission; changing configuration does not extend existing work or alter a paid reservation. Snapshot retention must cover payment waiting plus the full review. Operators must explicitly raise their relay limit too; their local cap can shorten an assignment.
+
+**New live website tests use separate waiting and execution clocks.** Migration 21 preserves existing deadlines and applies the new policy only to newly admitted `pentest_agent` reviews. Each role gets its saved attempt allowance when assigned. The whole request expires no later than 24 hours after admission or funding, capped by domain permission and test-account expiry. Waiting does not consume the role allowance, but those permission deadlines can still stop unfinished work. Live tests do not automatically retry an interrupted role.
+
+On a shared machine, the scheduler selects the oldest ready request across its assigned devices, regardless of which device polls first. Paid requests enter this order at funding; unpaid reservations receive no assignment. Paused, offline or incompatible assigned devices do not block unrelated ready work. The existing device/operator/compute-group lease prevents simultaneous assignments; no new instance or substitute operator is created. Review detail returns the number of earlier requests sharing its pending machines, without their identities or targets, plus the actual start and active-role deadline. Deploy dispatcher and gateway before using the new timing display in core.
 
 Renewal requires a signed, increasing sequence, a current assignment and fresh, unpaused presence. Duplicate renewals return the existing expiry and remaining time; they do not add time. Cancellation, expiry and revocation stop renewal. Clients must use a monotonic deadline and stop before losing the lease, including during a network outage.
 
@@ -228,7 +257,7 @@ Raw bundles expire after seven days. Owner deletion cancels unfinished reviews a
 
 Core can reserve a live assessment through `POST /internal/pentests/:id/admit-review`. It stays `awaiting_payment` until core confirms the matching settlement. Admission requires domain proof, scope approval, the named team and separate provider consent. Funding rechecks permission and team availability; it cannot extend an expired scope or restart cancelled work. Coupons use the existing idempotent start after core reserves the code.
 
-`pentest_agent` / `live_http_v1` is separate from snapshot collection. Migration `0012` stores an immutable origin/method/objective scope, owner permission note, admin decision and 24-hour expiry. The owner selects three private-approved devices with the signed `live_tests` opt-in and separately consents to operator and **abliteration.ai** access. Existing device polls omit that flag and remain compatible.
+`pentest_agent` / `live_http_v1` is separate from snapshot collection. Migration `0012` stores an immutable origin/method/objective scope, owner permission note, admin decision and 24-hour expiry. The owner selects three private-approved devices with the signed `live_tests` opt-in and separately consents to operator access and the inference providers shown for the team. Existing device polls omit that flag and remain compatible.
 
 Internal routes are `GET/POST /internal/pentests`, `POST /internal/pentests/:id/decision`, `GET /internal/pentests/:id/review-plan` and `POST /internal/pentests/:id/review`. Core applies its configured pilot, coupon or paid-access mode. A browser cannot claim that a payment settled.
 
@@ -290,3 +319,8 @@ Set `PATCHRIOT_CREDENTIAL_KEY` to the same 32 random bytes, hex encoded, on the 
 **Rolling upgrades:** update core before exposing new capability names, then update dispatcher/gateway, then the relays. Old core versions reject unknown capability names. Advanced options become available only when all selected components support them.
 
 For the hosted calibration run, `PATCHRIOT_AGENT_ATTEMPT_SECONDS=3600` is set on both dispatcher and gateway. Relays also use `max_attempt_seconds=3600`. The shared protocol accepts up to 200 model calls per role; relays enforce the actual call and cost allowance. Migration 20 widens the saved allowance without changing existing rows. Upgrade core and both servers before expanded-budget relays so their progress and reports are not rejected. Existing requests keep their saved deadlines.
+
+Session login uses the `session_login_v1` capability and immutable form/JSON endpoint settings in the scope. Migration 24 allows the fourth advertised capability; older workers are not eligible for these requests. A target can be saved without its secret. After DNS proof or an explicit owned-site staff grant, only its requester may call `POST /internal/pentests/:id/credentials` with `{scope_sha256, credentials}` before any review is admitted. The existing encrypted store and 24-hour/permission limit apply. Replacing an account never alters the scope or revives completed/cancelled work. Admission and account updates share the scheduler lock. API clients that supplied credentials during creation remain supported.
+
+
+Live candidates may declare `abliterated-model-large-v2` (Abliteration) or `abliteration-abliterated-model-large-v2` (Venice). A device declaration is immutable: switching routes needs a new paired and approved identity. Admission saves the selected declarations and provider list; polling and result acceptance require that model. A valid result from the other provider is still rejected for the wrong device. These two routes share one model family when ranking diversity. No fallback or replacement is authorized. Upgrade core before advertising a Venice device; existing jobs retain their original team.

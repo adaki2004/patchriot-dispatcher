@@ -40,7 +40,7 @@ pub(crate) async fn fund(
     sweep(&mut tx).await?;
     // Even staff must act as the paying account. Payment never grants consent
     // on another requester's behalf.
-    let current: ReviewRow = sqlx::query_as("SELECT id, request_id, state, mode, scenario, website_context, source_context, pentest_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds FROM reviews WHERE id = $1 AND requester_id = $2 FOR UPDATE")
+    let current: ReviewRow = sqlx::query_as("SELECT id, request_id, state, mode, scenario, website_context, source_context, pentest_context, payment_terms, payment_expires_at, funded_invoice_id, funded_at, created_at, deadline_at, agent_attempt_seconds, per_role_timing, first_downloaded_at, report_expires_at FROM reviews WHERE id = $1 AND requester_id = $2 FOR UPDATE")
         .bind(id).bind(caller.id).fetch_optional(&mut *tx).await?.ok_or_else(ApiError::missing)?;
     if current.request_id != input.request_id
         || current.payment_terms.as_ref().map(|terms| &terms.0) != Some(&input.price)
@@ -74,6 +74,7 @@ pub(crate) async fn fund(
     }
     let review_seconds =
         patchriot_protocol::agent_review_seconds(current.agent_attempt_seconds as u64);
+    let mut execution_deadline = Utc::now() + chrono::Duration::seconds(review_seconds as i64);
     if let Some(saved) = current.pentest_context {
         // Payment never extends domain permission or silently substitutes a
         // different operator. Re-check the scope when funds actually arrive.
@@ -98,10 +99,17 @@ pub(crate) async fn fund(
         {
             return Err(ApiError::conflict("selected_device_unavailable"));
         }
-        let retained: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pentests WHERE id=$1 AND requester_id=$2 AND state='approved' AND ownership_verified_at IS NOT NULL AND expires_at > now() + make_interval(secs => $3))")
+        let retained: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pentests WHERE id=$1 AND requester_id=$2 AND state='approved' AND (ownership_verified_at IS NOT NULL OR staff_authorized_at IS NOT NULL) AND expires_at > now() + make_interval(secs => $3))")
             .bind(context.pentest_id).bind(caller.id).bind(review_seconds as f64).fetch_one(&mut *tx).await?;
         if !retained {
             return Err(ApiError::conflict("live_scope_not_ready"));
+        }
+        if current.per_role_timing {
+            execution_deadline = sqlx::query_scalar("SELECT LEAST(p.expires_at, now()+interval '24 hours', c.expires_at) FROM pentests p LEFT JOIN pentest_credentials c ON c.pentest_id=p.id WHERE p.id=$1")
+                .bind(context.pentest_id).fetch_one(&mut *tx).await?;
+            if execution_deadline < Utc::now() + chrono::Duration::seconds(review_seconds as i64) {
+                return Err(ApiError::conflict("live_scope_not_ready"));
+            }
         }
     } else if let Some(context) = current.source_context {
         let ids: Vec<_> = context.reviewers.iter().map(|r| r.device_id).collect();
@@ -137,8 +145,8 @@ pub(crate) async fn fund(
         }
         websites::snapshot(&mut tx, id).await?;
     }
-    sqlx::query("UPDATE reviews SET state = 'queued', funded_invoice_id = $2, funded_at = now(), deadline_at = now() + make_interval(secs => $3) WHERE id = $1")
-        .bind(id).bind(input.invoice_id).bind(review_seconds as f64).execute(&mut *tx).await?;
+    sqlx::query("UPDATE reviews SET state = 'queued', funded_invoice_id = $2, funded_at = now(), deadline_at = $3 WHERE id = $1")
+        .bind(id).bind(input.invoice_id).bind(execution_deadline).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(Json(view(&state.pool, &caller, id).await?))
 }

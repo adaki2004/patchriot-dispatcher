@@ -74,7 +74,10 @@ pub(crate) async fn fund(
     }
     let review_seconds =
         patchriot_protocol::agent_review_seconds(current.agent_attempt_seconds as u64);
-    let mut execution_deadline = Utc::now() + chrono::Duration::seconds(review_seconds as i64);
+    // Use one instant for the activation and its budget. PostgreSQL now() is
+    // the transaction start, which can precede this point while locks are busy.
+    let funded_at = Utc::now();
+    let mut execution_deadline = funded_at + chrono::Duration::seconds(review_seconds as i64);
     if let Some(saved) = current.pentest_context {
         // Payment never extends domain permission or silently substitutes a
         // different operator. Re-check the scope when funds actually arrive.
@@ -145,8 +148,8 @@ pub(crate) async fn fund(
         }
         websites::snapshot(&mut tx, id).await?;
     }
-    sqlx::query("UPDATE reviews SET state = 'queued', funded_invoice_id = $2, funded_at = now(), deadline_at = $3 WHERE id = $1")
-        .bind(id).bind(input.invoice_id).bind(execution_deadline).execute(&mut *tx).await?;
+    sqlx::query("UPDATE reviews SET state = 'queued', funded_invoice_id = $2, funded_at = $4, deadline_at = $3 WHERE id = $1")
+        .bind(id).bind(input.invoice_id).bind(execution_deadline).bind(funded_at).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(Json(view(&state.pool, &caller, id).await?))
 }

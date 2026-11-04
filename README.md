@@ -326,3 +326,9 @@ Session login uses the `session_login_v1` capability and immutable form/JSON end
 
 
 Live candidates may declare `abliterated-model-large-v2` (Abliteration) or `abliteration-abliterated-model-large-v2` (Venice). A device declaration is immutable: switching routes needs a new paired and approved identity. Admission saves the selected declarations and provider list; polling and result acceptance require that model. A valid result from the other provider is still rejected for the wrong device. These two routes share one model family when ranking diversity. No fallback or replacement is authorized. Upgrade core before advertising a Venice device; existing jobs retain their original team.
+
+### Conditional live review
+
+Live review plans offer `investigate_verify_v1`: two required roles plus a third for serious findings, disagreement, unchecked claims or incomplete evidence. All three devices are named and checked at consent/funding; only the first two jobs are created initially. After their reports arrive, one completion transaction records the decision and, if necessary, queues the reserved third device. Results and reasons remain private. Cancellation, permission expiry and revocation still stop work. An incomplete earlier stage is never hidden by a later result.
+
+Missing `review_policy` keeps the original three-role behavior, including existing paid orders. Snapshot and source reviews reject the live-only policy. Upgrade dispatcher and gateway before the new core checkout. The shared protocol defines the policy; there is no model vote that can change permissions, pricing or the selected team.

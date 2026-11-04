@@ -176,6 +176,7 @@ pub(super) async fn create_review(
     payment: Option<(ReviewPrice, i64)>,
 ) -> Result<ReviewView, ApiError> {
     if !input.accepts_operator_access
+        || !input.review_policy.is_legacy()
         || input.device_ids.len() != 3
         || input.device_ids.iter().collect::<HashSet<_>>().len() != 3
     {

@@ -1,7 +1,9 @@
 # Patchriot Dispatcher
 **Approve the scope. Coordinate the agents. Keep the evidence.**
 
-The Rust service that approves devices, queues reviews and assigns work to agents. Patchriot runs it for the hosted service; staff install the managed relays during the beta, and customers use the website.
+The Rust service that approves devices, queues reviews and assigns work to managed agents. Customers use the website; only approved administrators pair machines. The hosted service uses Hermes on Kali with NEAR AI Private TEE inference. A separate business installation has its own services, agents, database and agreed access rules.
+
+Public agents cannot join the managed service. Device approval remains enforced in code; keeping this repository private is not an access control. NEAR attestation covers the model step, not the dispatcher, Kali host or truth of the findings.
 
 > **DON'T TRUST! VERIFY!** Audit the implementation and test its permission boundaries. Use authorized penetration tests against your own deployment. Private source, signed results and model confidence do not establish security.
 
@@ -324,3 +326,15 @@ Session login uses the `session_login_v1` capability and immutable form/JSON end
 
 
 Live candidates may declare `abliterated-model-large-v2` (Abliteration) or `abliteration-abliterated-model-large-v2` (Venice). A device declaration is immutable: switching routes needs a new paired and approved identity. Admission saves the selected declarations and provider list; polling and result acceptance require that model. A valid result from the other provider is still rejected for the wrong device. These two routes share one model family when ranking diversity. No fallback or replacement is authorized. Upgrade core before advertising a Venice device; existing jobs retain their original team.
+
+### Conditional live review
+
+Live review plans offer `investigate_verify_v1`: two required roles plus a third for serious findings, disagreement, unchecked claims or incomplete evidence. All three devices are named and checked at consent/funding; only the first two jobs are created initially. After their reports arrive, one completion transaction records the decision and, if necessary, queues the reserved third device. Results and reasons remain private. Cancellation, permission expiry and revocation still stop work. An incomplete earlier stage is never hidden by a later result.
+
+Missing `review_policy` keeps the original three-role behavior, including existing paid orders. Snapshot and source reviews reject the live-only policy. Upgrade dispatcher and gateway before the new core checkout. The shared protocol defines the policy; there is no model vote that can change permissions, pricing or the selected team.
+
+### NEAR recovery through Venice
+
+`PATCHRIOT_VENICE_FALLBACK_ENABLED=true` offers the fixed DeepSeek V4.1 Flash 1017 Uncensored backup at checkout. Default: off. Enable it only after the managed NEAR relays have `venice_fallback_key_file` configured and all services use the matching protocol.
+
+New consent saves `allows_venice_fallback`; it cannot be changed by replaying the request or payment. Old requests keep their original provider restriction. The gateway rejects a fallback receipt without that saved permission. Relays handle transient failures, call accounting and cost limits; this setting does not weaken target ownership, scope or model-signature checks. No database migration is required.

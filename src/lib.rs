@@ -34,6 +34,7 @@ pub struct AppState {
     credential_vault: Option<Arc<credentials::Vault>>,
     owned_test_origins: Arc<[String]>,
     near_check: Option<report_checks::NearCheck>,
+    venice_fallback_enabled: bool,
 }
 
 impl AppState {
@@ -63,6 +64,7 @@ impl AppState {
             credential_vault: None,
             owned_test_origins: Arc::from([]),
             near_check: None,
+            venice_fallback_enabled: false,
         })
     }
 
@@ -75,6 +77,13 @@ impl AppState {
         }
         self.agent_attempt_seconds = seconds;
         Ok(self)
+    }
+
+    /// Enable only after managed NEAR relays have their private Venice key.
+    /// Each new review must still save the requester's fallback permission.
+    pub fn with_venice_fallback(mut self, enabled: bool) -> Self {
+        self.venice_fallback_enabled = enabled;
+        self
     }
 
     pub fn with_credential_key(mut self, key: Option<String>) -> Result<Self, &'static str> {

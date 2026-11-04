@@ -798,6 +798,7 @@ pub async fn complete(
                 .iter()
                 .all(|tool| device.live_tools.contains(tool))
             || !result.valid(&context.scope)
+            || (result.execution.fallback.is_some() && !context.allows_venice_fallback)
             || device.introduction.declared_model.as_deref() != Some(&result.execution.model)
         {
             return Err(ApiError::bad("invalid_live_evidence"));
@@ -814,6 +815,9 @@ pub async fn complete(
     let receipt = patchriot_protocol::reports::WorkReceipt::from_result(&input.result).map(DbJson);
     sqlx::query("UPDATE review_steps SET state = 'completed', result = $1, fixture_matches = $2, evidence_complete = $4, work_receipt=$5 WHERE id = $3")
         .bind(DbJson(input.result)).bind(matches).bind(lease.step_id).bind(evidence_complete).bind(receipt).execute(&mut *tx).await?;
+    if lease.mode == "pentest_agent" {
+        pentests::advance(&mut tx, lease.review_id).await?;
+    }
     sqlx::query("UPDATE reviews SET state = CASE WHEN (SELECT bool_and(CASE WHEN reviews.mode IN ('website_agent','source_agent','pentest_agent') THEN evidence_complete ELSE fixture_matches END) FROM review_steps WHERE review_id = $1) THEN 'completed' ELSE 'needs_review' END WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM review_steps WHERE review_id = $1 AND state <> 'completed')")
         .bind(lease.review_id).execute(&mut *tx).await?;
     tx.commit().await?;

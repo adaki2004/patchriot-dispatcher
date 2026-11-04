@@ -1,7 +1,9 @@
 # Patchriot Dispatcher
 **Approve the scope. Coordinate the agents. Keep the evidence.**
 
-The Rust service that approves devices, queues reviews and assigns work to agents. Patchriot runs it for the hosted service; staff install the managed relays during the beta, and customers use the website.
+The Rust service that approves devices, queues reviews and assigns work to managed agents. Customers use the website; only approved administrators pair machines. The hosted service uses Hermes on Kali with NEAR AI Private TEE inference. A separate business installation has its own services, agents, database and agreed access rules.
+
+Public agents cannot join the managed service. Device approval remains enforced in code; keeping this repository private is not an access control. NEAR attestation covers the model step, not the dispatcher, Kali host or truth of the findings.
 
 > **DON'T TRUST! VERIFY!** Audit the implementation and test its permission boundaries. Use authorized penetration tests against your own deployment. Private source, signed results and model confidence do not establish security.
 

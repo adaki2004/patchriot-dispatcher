@@ -254,6 +254,7 @@ pub fn router(state: AppState) -> Router {
             get(reviews::pentests::list).post(reviews::pentests::create),
         )
         .route("/internal/pentest-tools", get(reviews::pentests::tools))
+        .route("/internal/pentests/{id}", get(reviews::pentests::detail))
         .route(
             "/internal/pentests/{id}/setup",
             post(reviews::pentests::update_setup),

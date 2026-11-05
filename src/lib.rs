@@ -31,6 +31,7 @@ pub struct AppState {
     internal_hash: Option<Arc<[u8; 32]>>,
     pub audience: Arc<str>,
     agent_attempt_seconds: u64,
+    compute_group_concurrency: u8,
     credential_vault: Option<Arc<credentials::Vault>>,
     owned_test_origins: Arc<[String]>,
     near_check: Option<report_checks::NearCheck>,
@@ -61,6 +62,7 @@ impl AppState {
             internal_hash: None,
             audience: audience.into(),
             agent_attempt_seconds: patchriot_protocol::DEFAULT_AGENT_ATTEMPT_SECONDS,
+            compute_group_concurrency: 1,
             credential_vault: None,
             owned_test_origins: Arc::from([]),
             near_check: None,
@@ -76,6 +78,16 @@ impl AppState {
             return Err("agent attempt limit must be 600..3600 seconds");
         }
         self.agent_attempt_seconds = seconds;
+        Ok(self)
+    }
+
+    /// Each device still runs one role at a time. Raise only after measuring the
+    /// host; shared-machine agents are never presented as independent operators.
+    pub fn with_compute_group_concurrency(mut self, limit: u8) -> Result<Self, &'static str> {
+        if !(1..=4).contains(&limit) {
+            return Err("compute group concurrency must be 1..4");
+        }
+        self.compute_group_concurrency = limit;
         Ok(self)
     }
 

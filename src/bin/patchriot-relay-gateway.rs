@@ -20,6 +20,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| "database connection or migration failed")?;
     let state = AppState::relay_only(pool, audience)?
         .with_agent_attempt_seconds(seconds)?
+        .with_compute_group_concurrency(
+            std::env::var("PATCHRIOT_COMPUTE_GROUP_CONCURRENCY")
+                .unwrap_or_else(|_| "1".into())
+                .parse::<u8>()
+                .map_err(|_| "PATCHRIOT_COMPUTE_GROUP_CONCURRENCY must be 1..4")?,
+        )?
         .with_credential_key(std::env::var("PATCHRIOT_CREDENTIAL_KEY").ok())?;
     // This separate variable never changes the main dispatcher's internal bind.
     // A non-loopback listener needs HTTPS termination; the binary does not add TLS.

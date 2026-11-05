@@ -4,7 +4,7 @@
 
 The dispatcher verifies permission, assigns the agents, tracks progress and keeps the evidence private. A model can suggest a test; it cannot authorize a new target or override the saved limits.
 
-[Use Patchriot ↗](https://patchriot.tech) · [How a review works](https://patchriot.tech/#/docs/workflow)
+[Use Patchriot ↗](https://patchriot.net) · [How a review works](https://patchriot.net/#/docs/workflow)
 
 ```mermaid
 flowchart LR
@@ -64,13 +64,14 @@ Removing the configuration stops new grants. Revoke an existing request through 
 <details>
 <summary>Developer setup: run your own dispatcher</summary>
 
-These instructions start a separate local installation. To request a website assessment, use the hosted beta at [patchriot.tech](https://patchriot.tech).
+These instructions start a separate local installation. To request a website assessment, use the hosted beta at [patchriot.net](https://patchriot.net).
 
 Keep `patchriot-core` beside this repository for the Apache-2.0 protocol crate. Use **Rust 1.94.1** and a dedicated **PostgreSQL 17** database.
 
 | Private environment variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | Dedicated PostgreSQL connection |
+| `PATCHRIOT_COMPUTE_GROUP_CONCURRENCY` | Active roles per operator/machine, 1 by default, range 1–4. Set the same value on dispatcher and gateway. Roles within one review remain sequential; lower limits let existing work finish. Measure memory and provider latency before increasing. |
 | `PATCHRIOT_INTERNAL_KEY` | Generated service secret, at least 32 bytes; shared with core |
 | `PATCHRIOT_AUDIENCE` | Stable deployment identifier, e.g. `patchriot-local-v1` |
 | `PATCHRIOT_BIND` | Optional listener; default `127.0.0.1:7411` |

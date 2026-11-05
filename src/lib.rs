@@ -255,6 +255,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/internal/pentest-tools", get(reviews::pentests::tools))
         .route(
+            "/internal/pentests/{id}/setup",
+            post(reviews::pentests::update_setup),
+        )
+        .route(
             "/internal/pentests/{id}/credentials",
             post(reviews::pentests::set_credentials),
         )

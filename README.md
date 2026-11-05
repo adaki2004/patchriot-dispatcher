@@ -21,6 +21,7 @@ flowchart LR
 ## What it owns
 
 - **Permission:** exact HTTPS origins, request-specific DNS proof, consent and expiry. Redirects cannot widen scope.
+- **Page dependencies:** optional exact HTTPS hosts saved in browser scope. Agents may read public assets there; they cannot log in, send account credentials or extend testing to them. Changes require new scope consent.
 - **Work:** approved devices, queue capacity, bounded assignments, cancellation and retries. The agents stay on managed Kali machines.
 - **Evidence:** private findings, tool records, disagreements and report deletion. Admin activity counts cover the full history, without loading report bodies.
 
@@ -415,3 +416,16 @@ New consent saves `allows_venice_fallback`; it cannot be changed by replaying th
 `POST /internal/pentests/:id/setup` is requester-only and requires the current scope hash and fresh consent. The scheduler lock serializes edits with admission. Changed origins clear authorization and create fresh DNS challenges; same-origin changes retain current DNS proof without extending expiry. Changed permissions delete saved credentials. Any admitted assessment, including an unpaid or cancelled one, locks the setup.
 
 Production-risk consent uses `web_active_v2` and requires `active_web_v2` agents; existing V1 scopes retain their exact instructions and hashes. Deploy core before exposing new capabilities, then migration 27 on dispatcher/gateway, then adapter 12 relays. The extra capability is unavailable until enough eligible agents advertise it.
+
+### Wallet target access
+
+`wallet_login_v1` is an explicit grey-box capability. The saved scope binds the two same-origin SIWE endpoints, chain and verification format. After ownership verification, the requester saves `{ "kind": "wallet" }` through the normal credentials route to authorize fresh, unfunded relay wallets. No wallet key is stored or accepted. Admission, expiry, revocation, payment and assigned-lease checks remain the same; old agents cannot claim this work. Migration 28 permits the seventh advertised capability. Deploy core, dispatcher and gateway before upgrading relays; availability requires three eligible devices. Supported HTTP formats and limits are in core’s README.
+
+
+### Browser-discovered target login
+
+New `browser_login_v1` scopes contain an optional entry path, not a site's API layout. The requester still supplies a dedicated account/token or authorizes a fresh unfunded EVM wallet after ownership verification. The existing encrypted credential store, requester consent, leases, cancellation and payment rules apply.
+
+Migration `0029_browser_login.sql` permits eight advertised tool capabilities. Deploy core, dispatcher and its gateway before adapter 13 relays advertise the new name. Selection, payment activation and leases require eligible browser-capable agents; availability needs three. The relay also requires the inspected browser image and host sandbox profile. Existing HTTP form/JSON and SIWE scopes remain valid and keep their original hashes.
+
+Complete authenticated evidence requires a relay-produced comparison of the same resource with and without access: 2xx versus 401/403, or a matching account identity absent/different anonymously. The dispatcher checks the recorded references and proof shape; it does not independently replay the target requests or attest operator honesty. Missing proof leaves authenticated coverage incomplete. Core's report and exports show that gap. Cookie/signature creation alone never satisfies it.

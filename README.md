@@ -415,3 +415,7 @@ New consent saves `allows_venice_fallback`; it cannot be changed by replaying th
 `POST /internal/pentests/:id/setup` is requester-only and requires the current scope hash and fresh consent. The scheduler lock serializes edits with admission. Changed origins clear authorization and create fresh DNS challenges; same-origin changes retain current DNS proof without extending expiry. Changed permissions delete saved credentials. Any admitted assessment, including an unpaid or cancelled one, locks the setup.
 
 Production-risk consent uses `web_active_v2` and requires `active_web_v2` agents; existing V1 scopes retain their exact instructions and hashes. Deploy core before exposing new capabilities, then migration 27 on dispatcher/gateway, then adapter 12 relays. The extra capability is unavailable until enough eligible agents advertise it.
+
+### Wallet target access
+
+`wallet_login_v1` is an explicit grey-box capability. The saved scope binds the two same-origin SIWE endpoints, chain and verification format. After ownership verification, the requester saves `{ "kind": "wallet" }` through the normal credentials route to authorize fresh, unfunded relay wallets. No wallet key is stored or accepted. Admission, expiry, revocation, payment and assigned-lease checks remain the same; old agents cannot claim this work. Migration 28 permits the seventh advertised capability. Deploy core, dispatcher and gateway before upgrading relays; availability requires three eligible devices. Supported HTTP formats and limits are in core’s README.

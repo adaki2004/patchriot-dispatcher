@@ -32,6 +32,7 @@ pub struct AppState {
     pub audience: Arc<str>,
     agent_attempt_seconds: u64,
     compute_group_concurrency: u8,
+    live_requests_per_day: u16,
     credential_vault: Option<Arc<credentials::Vault>>,
     owned_test_origins: Arc<[String]>,
     near_check: Option<report_checks::NearCheck>,
@@ -63,6 +64,7 @@ impl AppState {
             audience: audience.into(),
             agent_attempt_seconds: patchriot_protocol::DEFAULT_AGENT_ATTEMPT_SECONDS,
             compute_group_concurrency: 1,
+            live_requests_per_day: 10,
             credential_vault: None,
             owned_test_origins: Arc::from([]),
             near_check: None,
@@ -88,6 +90,16 @@ impl AppState {
             return Err("compute group concurrency must be 1..4");
         }
         self.compute_group_concurrency = limit;
+        Ok(self)
+    }
+
+    /// New permission records per requester in a rolling 24-hour window.
+    /// This does not raise active-job, scope, payment or per-role limits.
+    pub fn with_live_requests_per_day(mut self, limit: u16) -> Result<Self, &'static str> {
+        if !(1..=100).contains(&limit) {
+            return Err("live requests per day must be 1..100");
+        }
+        self.live_requests_per_day = limit;
         Ok(self)
     }
 

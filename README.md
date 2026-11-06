@@ -72,6 +72,7 @@ Keep `patchriot-core` beside this repository for the Apache-2.0 protocol crate. 
 | --- | --- |
 | `DATABASE_URL` | Dedicated PostgreSQL connection |
 | `PATCHRIOT_COMPUTE_GROUP_CONCURRENCY` | Active roles per operator/machine, 1 by default, range 1–4. Set the same value on dispatcher and gateway. Roles within one review remain sequential; lower limits let existing work finish. Measure memory and provider latency before increasing. |
+| `PATCHRIOT_LIVE_REQUESTS_PER_DAY` | New live-test permission records per requester in a rolling 24 hours; default 10, range 1–100. Set on the internal dispatcher. Active-job, payment and execution limits remain separate. |
 | `PATCHRIOT_INTERNAL_KEY` | Generated service secret, at least 32 bytes; shared with core |
 | `PATCHRIOT_AUDIENCE` | Stable deployment identifier, e.g. `patchriot-local-v1` |
 | `PATCHRIOT_BIND` | Optional listener; default `127.0.0.1:7411` |

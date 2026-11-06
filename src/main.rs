@@ -31,6 +31,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::env::var("PATCHRIOT_VENICE_FALLBACK_ENABLED").as_deref() == Ok("true"),
         )
         .with_agent_attempt_seconds(seconds)?
+        .with_live_requests_per_day(
+            std::env::var("PATCHRIOT_LIVE_REQUESTS_PER_DAY")
+                .unwrap_or_else(|_| "10".into())
+                .parse::<u16>()
+                .map_err(|_| "PATCHRIOT_LIVE_REQUESTS_PER_DAY must be 1..100")?,
+        )?
         .with_compute_group_concurrency(
             std::env::var("PATCHRIOT_COMPUTE_GROUP_CONCURRENCY")
                 .unwrap_or_else(|_| "1".into())

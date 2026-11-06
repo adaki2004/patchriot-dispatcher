@@ -31,10 +31,15 @@ pub struct AppState {
     internal_hash: Option<Arc<[u8; 32]>>,
     pub audience: Arc<str>,
     agent_attempt_seconds: u64,
+    compute_group_concurrency: u8,
+    live_requests_per_day: u16,
+    live_reviews_per_requester: u8,
     credential_vault: Option<Arc<credentials::Vault>>,
     owned_test_origins: Arc<[String]>,
     near_check: Option<report_checks::NearCheck>,
     venice_fallback_enabled: bool,
+    inference_primary: Option<patchriot_protocol::pentests::LiveProvider>,
+    inference_secondary: Option<patchriot_protocol::pentests::LiveProvider>,
 }
 
 impl AppState {
@@ -61,10 +66,15 @@ impl AppState {
             internal_hash: None,
             audience: audience.into(),
             agent_attempt_seconds: patchriot_protocol::DEFAULT_AGENT_ATTEMPT_SECONDS,
+            compute_group_concurrency: 1,
+            live_requests_per_day: 10,
+            live_reviews_per_requester: 3,
             credential_vault: None,
             owned_test_origins: Arc::from([]),
             near_check: None,
             venice_fallback_enabled: false,
+            inference_primary: None,
+            inference_secondary: None,
         })
     }
 
@@ -79,11 +89,65 @@ impl AppState {
         Ok(self)
     }
 
+    /// Each device still runs one role at a time. Raise only after measuring the
+    /// host; shared-machine agents are never presented as independent operators.
+    pub fn with_compute_group_concurrency(mut self, limit: u8) -> Result<Self, &'static str> {
+        if !(1..=4).contains(&limit) {
+            return Err("compute group concurrency must be 1..4");
+        }
+        self.compute_group_concurrency = limit;
+        Ok(self)
+    }
+
+    /// New permission records per requester in a rolling 24-hour window.
+    /// This does not raise active-job, scope, payment or per-role limits.
+    pub fn with_live_requests_per_day(mut self, limit: u16) -> Result<Self, &'static str> {
+        if !(1..=100).contains(&limit) {
+            return Err("live requests per day must be 1..100");
+        }
+        self.live_requests_per_day = limit;
+        Ok(self)
+    }
+
+    /// Waiting reviews may need more queue slots than the host has execution
+    /// slots. This changes admission only; workers keep their concurrency cap.
+    pub fn with_live_reviews_per_requester(mut self, limit: u8) -> Result<Self, &'static str> {
+        if !(1..=30).contains(&limit) {
+            return Err("live reviews per requester must be 1..30");
+        }
+        self.live_reviews_per_requester = limit;
+        Ok(self)
+    }
+
     /// Enable only after managed NEAR relays have their private Venice key.
     /// Each new review must still save the requester's fallback permission.
     pub fn with_venice_fallback(mut self, enabled: bool) -> Self {
         self.venice_fallback_enabled = enabled;
         self
+    }
+
+    /// Filters teams for new requests only. Existing requests retain their
+    /// selected devices and optional backup, including after a config change.
+    pub fn with_inference_routing(
+        mut self,
+        primary: Option<&str>,
+        secondary: Option<&str>,
+    ) -> Result<Self, &'static str> {
+        use patchriot_protocol::pentests::LiveProvider;
+        let parse =
+            |value: &str| LiveProvider::from_model(value).ok_or("unsupported inference model");
+        let primary = primary.map(parse).transpose()?;
+        let secondary = secondary.map(parse).transpose()?;
+        if (primary.is_some() && self.venice_fallback_enabled)
+            || secondary.is_some_and(|s| primary.is_none_or(|p| !p.permits_secondary(s)))
+        {
+            return Err(
+                "use one inference routing configuration with a supported primary/secondary pair",
+            );
+        }
+        self.inference_primary = primary;
+        self.inference_secondary = secondary;
+        Ok(self)
     }
 
     pub fn with_credential_key(mut self, key: Option<String>) -> Result<Self, &'static str> {

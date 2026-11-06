@@ -30,7 +30,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_venice_fallback(
             std::env::var("PATCHRIOT_VENICE_FALLBACK_ENABLED").as_deref() == Ok("true"),
         )
+        .with_inference_routing(
+            std::env::var("PATCHRIOT_INFERENCE_PRIMARY_MODEL")
+                .ok()
+                .as_deref(),
+            std::env::var("PATCHRIOT_INFERENCE_SECONDARY_MODEL")
+                .ok()
+                .as_deref(),
+        )?
         .with_agent_attempt_seconds(seconds)?
+        .with_live_requests_per_day(
+            std::env::var("PATCHRIOT_LIVE_REQUESTS_PER_DAY")
+                .unwrap_or_else(|_| "10".into())
+                .parse::<u16>()
+                .map_err(|_| "PATCHRIOT_LIVE_REQUESTS_PER_DAY must be 1..100")?,
+        )?
+        .with_live_reviews_per_requester(
+            std::env::var("PATCHRIOT_LIVE_REVIEWS_PER_REQUESTER")
+                .unwrap_or_else(|_| "3".into())
+                .parse::<u8>()
+                .map_err(|_| "PATCHRIOT_LIVE_REVIEWS_PER_REQUESTER must be 1..30")?,
+        )?
+        .with_compute_group_concurrency(
+            std::env::var("PATCHRIOT_COMPUTE_GROUP_CONCURRENCY")
+                .unwrap_or_else(|_| "1".into())
+                .parse::<u8>()
+                .map_err(|_| "PATCHRIOT_COMPUTE_GROUP_CONCURRENCY must be 1..4")?,
+        )?
         .with_credential_key(std::env::var("PATCHRIOT_CREDENTIAL_KEY").ok())?
         .with_owned_test_origins(
             std::env::var("PATCHRIOT_OWNED_TEST_ORIGINS")

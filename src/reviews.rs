@@ -461,6 +461,7 @@ async fn next_live_step(
           AND d.introduction->>'runtime'='hermes'
           AND d.introduction->>'declared_model'=ANY($5)
           AND (d.id=$1 OR (d.live_tests AND d.work_polled_at>now()-interval '30 seconds'))
+          AND NOT EXISTS(SELECT 1 FROM work_leases busy WHERE busy.device_id=d.id AND busy.state='active')
           AND (CASE WHEN d.id=$1 THEN $4::jsonb ELSE d.live_tools END)
               @> COALESCE(r.pentest_context->'scope'->'tools','[]'::jsonb)
           AND NOT EXISTS(SELECT 1 FROM review_steps previous
@@ -579,16 +580,19 @@ pub async fn poll(
                 assignment = Some(existing.assignment()?);
             }
         } else {
-            let busy: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM work_leases WHERE compute_group = $1 AND operator_id = $2 AND state = 'active')")
+            // The scheduler transaction lock makes counting and assignment
+            // atomic across gateways. Lowering the limit lets existing work
+            // finish before another role can take a slot.
+            let active: i64 = sqlx::query_scalar("SELECT count(*) FROM work_leases WHERE compute_group = $1 AND operator_id = $2 AND state = 'active'")
                 .bind(&device.introduction.compute_group).bind(device.operator_id).fetch_one(&mut *tx).await?;
-            if !busy {
+            if active < i64::from(state.compute_group_concurrency) {
                 let next_live = if modes.contains(&"pentest_agent") {
                     next_live_step(&mut tx, id, &device, &request.payload.live_tools).await?
                 } else {
                     None
                 };
-                // Three distinct devices, sequential roles, and one shared-compute
-                // slot. Actual operator independence is reported, never assumed.
+                // Roles within a review stay sequential and use distinct devices.
+                // Spare host slots can serve other reviews without changing identity.
                 let step: Option<(Uuid, Uuid, String, i32)> = sqlx::query_as("SELECT s.id, s.review_id, r.mode, r.agent_attempt_seconds FROM review_steps s JOIN reviews r ON r.id = s.review_id WHERE s.state = 'queued' AND r.state IN ('queued','running') AND r.mode = ANY($2) AND (r.mode <> 'pentest_agent' OR s.id=$4) AND (r.mode <> 'pentest_agent' OR $3::jsonb @> COALESCE(r.pentest_context->'scope'->'tools', '[]'::jsonb)) AND (s.assigned_device_id IS NULL OR s.assigned_device_id = $1) AND r.deadline_at > now() AND NOT EXISTS (SELECT 1 FROM review_steps previous WHERE previous.review_id = r.id AND previous.position < s.position AND previous.state <> 'completed') AND NOT EXISTS (SELECT 1 FROM review_steps used JOIN work_leases l ON l.id = used.current_lease_id WHERE used.review_id = r.id AND used.state = 'completed' AND l.device_id = $1) ORDER BY r.created_at, s.position LIMIT 1 FOR UPDATE OF s")
                     .bind(id).bind(&modes).bind(DbJson(&request.payload.live_tools)).bind(next_live).fetch_optional(&mut *tx).await?;
                 if let Some((step_id, review_id, mode, attempt_seconds)) = step {
@@ -839,7 +843,7 @@ pub async fn complete(
                 .iter()
                 .all(|tool| device.live_tools.contains(tool))
             || !result.valid(&context.scope)
-            || (result.execution.fallback.is_some() && !context.allows_venice_fallback)
+            || !context.permits_fallback(&result.execution)
             || device.introduction.declared_model.as_deref() != Some(&result.execution.model)
         {
             return Err(ApiError::bad("invalid_live_evidence"));

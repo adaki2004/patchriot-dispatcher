@@ -43,12 +43,24 @@ pub(super) async fn eligible_with_tools(
     mode: ReviewMode,
     tools: &[patchriot_protocol::pentests::LiveToolProfile],
 ) -> Result<Vec<Candidate>, ApiError> {
+    eligible_with_route(tx, ids, mode, tools, None).await
+}
+
+pub(super) async fn eligible_with_route(
+    tx: &mut Tx<'_>,
+    ids: Option<&[Uuid]>,
+    mode: ReviewMode,
+    tools: &[patchriot_protocol::pentests::LiveToolProfile],
+    primary: Option<patchriot_protocol::pentests::LiveProvider>,
+) -> Result<Vec<Candidate>, ApiError> {
+    // Apply routing before the candidate limit so another provider's devices
+    // cannot crowd out the selected primary in a larger fleet.
     // Introductions are immutable after pairing. A signed poll declares support
     // for this task, separately from staff approval and requester consent.
     // Presence-only restarts must not retain work availability forever. Busy
     // agents renew a live lease instead of polling while they execute a task.
-    let rows = sqlx::query_as::<_, Candidate>("SELECT d.id, d.operator_id, o.display_name AS operator_name, d.introduction, COALESCE(q.pending,0) AS pending_roles, EXISTS (SELECT 1 FROM work_leases busy WHERE busy.device_id = d.id AND busy.state = 'active' AND busy.expires_at > now() AND busy.deadline_at > now()) AS busy FROM devices d JOIN operators o ON o.id = d.operator_id LEFT JOIN (SELECT s.assigned_device_id, count(*) AS pending FROM review_steps s JOIN reviews r ON r.id = s.review_id WHERE r.state IN ('awaiting_payment','queued','running') AND s.state IN ('queued','leased') GROUP BY s.assigned_device_id) q ON q.assigned_device_id = d.id WHERE d.approval = 'approved' AND d.private_work_approved AND (CASE $2 WHEN 'source_agent' THEN d.source_reviews WHEN 'pentest_agent' THEN d.live_tests ELSE d.website_reviews END) AND NOT d.paused AND d.last_seen_at > now() - interval '30 seconds' AND (d.work_polled_at > now() - interval '30 seconds' OR EXISTS (SELECT 1 FROM work_leases l WHERE l.device_id = d.id AND l.state = 'active' AND l.expires_at > now() AND l.deadline_at > now())) AND d.introduction->>'runtime' = 'hermes' AND ($2 <> 'pentest_agent' OR d.introduction->>'declared_model' = ANY($4)) AND d.live_tools @> $3::jsonb AND ($1::uuid[] IS NULL OR d.id = ANY($1)) ORDER BY d.created_at, d.id LIMIT 200 FOR UPDATE OF d")
-        .bind(ids).bind(mode.as_str()).bind(DbJson(tools)).bind(&patchriot_protocol::pentests::LiveProvider::MODELS[..]).fetch_all(&mut **tx).await?;
+    let rows = sqlx::query_as::<_, Candidate>("SELECT d.id, d.operator_id, o.display_name AS operator_name, d.introduction, COALESCE(q.pending,0) AS pending_roles, EXISTS (SELECT 1 FROM work_leases busy WHERE busy.device_id = d.id AND busy.state = 'active' AND busy.expires_at > now() AND busy.deadline_at > now()) AS busy FROM devices d JOIN operators o ON o.id = d.operator_id LEFT JOIN (SELECT s.assigned_device_id, count(*) AS pending FROM review_steps s JOIN reviews r ON r.id = s.review_id WHERE r.state IN ('awaiting_payment','queued','running') AND s.state IN ('queued','leased') GROUP BY s.assigned_device_id) q ON q.assigned_device_id = d.id WHERE d.approval = 'approved' AND d.private_work_approved AND (CASE $2 WHEN 'source_agent' THEN d.source_reviews WHEN 'pentest_agent' THEN d.live_tests ELSE d.website_reviews END) AND NOT d.paused AND d.last_seen_at > now() - interval '30 seconds' AND (d.work_polled_at > now() - interval '30 seconds' OR EXISTS (SELECT 1 FROM work_leases l WHERE l.device_id = d.id AND l.state = 'active' AND l.expires_at > now() AND l.deadline_at > now())) AND d.introduction->>'runtime' = 'hermes' AND ($2 <> 'pentest_agent' OR d.introduction->>'declared_model' = ANY($4)) AND d.live_tools @> $3::jsonb AND ($1::uuid[] IS NULL OR d.id = ANY($1)) AND ($5::text IS NULL OR d.introduction->>'declared_model' = $5) ORDER BY d.created_at, d.id LIMIT 200 FOR UPDATE OF d")
+        .bind(ids).bind(mode.as_str()).bind(DbJson(tools)).bind(&patchriot_protocol::pentests::LiveProvider::MODELS[..]).bind(primary.map(|p| p.model())).fetch_all(&mut **tx).await?;
     Ok(rows)
 }
 
@@ -178,6 +190,7 @@ pub(super) async fn create_review(
     if !input.accepts_operator_access
         || !input.review_policy.is_legacy()
         || input.allows_venice_fallback
+        || input.fallback_model.is_some()
         || input.device_ids.len() != 3
         || input.device_ids.iter().collect::<HashSet<_>>().len() != 3
     {

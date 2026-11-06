@@ -83,6 +83,7 @@ pub(super) async fn create_review(
     if !input.accepts_operator_access
         || !input.review_policy.is_legacy()
         || input.allows_venice_fallback
+        || input.fallback_model.is_some()
         || input.device_ids.len() != 3
         || input.device_ids.iter().collect::<HashSet<_>>().len() != 3
     {

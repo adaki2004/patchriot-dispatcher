@@ -4,7 +4,7 @@
 
 The dispatcher verifies permission, assigns the agents, tracks progress and keeps the evidence private. A model can suggest a test; it cannot authorize a new target or override the saved limits.
 
-[Use Patchriot ↗](https://patchriot.tech) · [How a review works](https://patchriot.tech/#/docs/workflow)
+[Use Patchriot ↗](https://patchriot.net) · [How a review works](https://patchriot.net/#/docs/workflow)
 
 ```mermaid
 flowchart LR
@@ -64,13 +64,16 @@ Removing the configuration stops new grants. Revoke an existing request through 
 <details>
 <summary>Developer setup: run your own dispatcher</summary>
 
-These instructions start a separate local installation. To request a website assessment, use the hosted beta at [patchriot.tech](https://patchriot.tech).
+These instructions start a separate local installation. To request a website assessment, use the hosted beta at [patchriot.net](https://patchriot.net).
 
 Keep `patchriot-core` beside this repository for the Apache-2.0 protocol crate. Use **Rust 1.94.1** and a dedicated **PostgreSQL 17** database.
 
 | Private environment variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | Dedicated PostgreSQL connection |
+| `PATCHRIOT_COMPUTE_GROUP_CONCURRENCY` | Active roles per operator/machine, 1 by default, range 1–4. Set the same value on dispatcher and gateway. Roles within one review remain sequential; lower limits let existing work finish. Measure memory and provider latency before increasing. |
+| `PATCHRIOT_LIVE_REQUESTS_PER_DAY` | New live-test permission records per requester in a rolling 24 hours; default 10, range 1–100. Set on the internal dispatcher. Active-job, payment and execution limits remain separate. |
+| `PATCHRIOT_LIVE_REVIEWS_PER_REQUESTER` | Unfinished reviews allowed when admitting a live test; default 3, range 1–30. Includes waiting, running and unpaid reservations. Set on the internal dispatcher. The global queue stays capped at 30; this does not increase simultaneous agent work. |
 | `PATCHRIOT_INTERNAL_KEY` | Generated service secret, at least 32 bytes; shared with core |
 | `PATCHRIOT_AUDIENCE` | Stable deployment identifier, e.g. `patchriot-local-v1` |
 | `PATCHRIOT_BIND` | Optional listener; default `127.0.0.1:7411` |
@@ -394,7 +397,7 @@ Automatic HTML login uses `form_discovery_v1`. Migration 26 allows relays to adv
 Session login uses the `session_login_v1` capability and immutable form/JSON endpoint settings in the scope. Migration 24 allows the fourth advertised capability; older workers are not eligible for these requests. A target can be saved without its secret. After DNS proof or an explicit owned-site staff grant, only its requester may call `POST /internal/pentests/:id/credentials` with `{scope_sha256, credentials}` before any review is admitted. The existing encrypted store and 24-hour/permission limit apply. Replacing an account never alters the scope or revives completed/cancelled work. Admission and account updates share the scheduler lock. API clients that supplied credentials during creation remain supported.
 
 
-Live candidates may declare `abliterated-model-large-v2` (Abliteration) or `abliteration-abliterated-model-large-v2` (Venice). A device declaration is immutable: switching routes needs a new paired and approved identity. Admission saves the selected declarations and provider list; polling and result acceptance require that model. A valid result from the other provider is still rejected for the wrong device. These two routes share one model family when ranking diversity. No fallback or replacement is authorized. Upgrade core before advertising a Venice device; existing jobs retain their original team.
+Live candidates may declare `abliterated-model-large-v2` (Abliteration) or `abliteration-abliterated-model-large-v2` (Venice). A device declaration is immutable: switching routes needs a new paired and approved identity. Admission saves the selected declarations and provider list; polling and result acceptance require that model. A valid result from the other provider is still rejected for the wrong device. These two routes share one model family when ranking diversity. A backup requires the separate saved permission described below; no replacement operator is authorized. Upgrade core before advertising a Venice device; existing jobs retain their original team.
 
 ### Conditional live review
 
@@ -404,9 +407,13 @@ Missing `review_policy` keeps the original three-role behavior, including existi
 
 ### NEAR recovery through Venice
 
-`PATCHRIOT_VENICE_FALLBACK_ENABLED=true` offers the fixed DeepSeek V4.1 Flash 1017 Uncensored backup at checkout. Default: off. Enable it only after the managed NEAR relays have `venice_fallback_key_file` configured and all services use the matching protocol.
+For new requests, `PATCHRIOT_INFERENCE_PRIMARY_MODEL` optionally limits selection to approved devices declaring that model. `PATCHRIOT_INFERENCE_SECONDARY_MODEL` optionally offers the other supported DeepSeek provider as a backup. Both NEAR → Venice and Venice → NEAR are supported; omit secondary to disable fallback. Supported models are `deepseek-ai/DeepSeek-V4.1-Flash-1017-abliterated` and `deepseek-v4-1-flash-1017-uncensored`. A secondary without a primary, an unknown model or an unsupported pair stops startup. No new route order is assumed when both settings are absent.
 
-New consent saves `allows_venice_fallback`; it cannot be changed by replaying the request or payment. Old requests keep their original provider restriction. The gateway rejects a fallback receipt without that saved permission. Relays handle transient failures, call accounting and cost limits; this setting does not weaken target ownership, scope or model-signature checks. No database migration is required.
+Configure matching primary credentials and optional `secondary_model` / `secondary_key_file` on the relays before offering the route. Settings are private deployment configuration. Existing paired model declarations cannot change; switching to a new primary needs approved devices for that model. Do not retire devices with queued work. Deploy core, dispatcher/gateway and relay before enabling the new settings; older services cannot accept the new consent/model.
+
+New consent saves the exact optional `fallback_model`. Coupon/payment replay cannot add or change it, and the gateway rejects a receipt for an unapproved backup. Changing deployment configuration affects only new admission. Relays preserve spending/call/time limits and require NEAR encryption, attestation and signatures whenever that route is used. The optional NEAR report check remains a separate feature.
+
+Legacy `PATCHRIOT_VENICE_FALLBACK_ENABLED=true` and `allows_venice_fallback` still support the original NEAR-to-Venice route. Do not combine that flag with the new settings. Old serialized consent and receipts are unchanged. No migration is needed.
 
 </details>
 

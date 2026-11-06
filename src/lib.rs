@@ -38,6 +38,8 @@ pub struct AppState {
     owned_test_origins: Arc<[String]>,
     near_check: Option<report_checks::NearCheck>,
     venice_fallback_enabled: bool,
+    inference_primary: Option<patchriot_protocol::pentests::LiveProvider>,
+    inference_secondary: Option<patchriot_protocol::pentests::LiveProvider>,
 }
 
 impl AppState {
@@ -71,6 +73,8 @@ impl AppState {
             owned_test_origins: Arc::from([]),
             near_check: None,
             venice_fallback_enabled: false,
+            inference_primary: None,
+            inference_secondary: None,
         })
     }
 
@@ -120,6 +124,30 @@ impl AppState {
     pub fn with_venice_fallback(mut self, enabled: bool) -> Self {
         self.venice_fallback_enabled = enabled;
         self
+    }
+
+    /// Filters teams for new requests only. Existing requests retain their
+    /// selected devices and optional backup, including after a config change.
+    pub fn with_inference_routing(
+        mut self,
+        primary: Option<&str>,
+        secondary: Option<&str>,
+    ) -> Result<Self, &'static str> {
+        use patchriot_protocol::pentests::LiveProvider;
+        let parse =
+            |value: &str| LiveProvider::from_model(value).ok_or("unsupported inference model");
+        let primary = primary.map(parse).transpose()?;
+        let secondary = secondary.map(parse).transpose()?;
+        if (primary.is_some() && self.venice_fallback_enabled)
+            || secondary.is_some_and(|s| primary.is_none_or(|p| !p.permits_secondary(s)))
+        {
+            return Err(
+                "use one inference routing configuration with a supported primary/secondary pair",
+            );
+        }
+        self.inference_primary = primary;
+        self.inference_secondary = secondary;
+        Ok(self)
     }
 
     pub fn with_credential_key(mut self, key: Option<String>) -> Result<Self, &'static str> {

@@ -843,7 +843,7 @@ pub async fn complete(
                 .iter()
                 .all(|tool| device.live_tools.contains(tool))
             || !result.valid(&context.scope)
-            || (result.execution.fallback.is_some() && !context.allows_venice_fallback)
+            || !context.permits_fallback(&result.execution)
             || device.introduction.declared_model.as_deref() != Some(&result.execution.model)
         {
             return Err(ApiError::bad("invalid_live_evidence"));

@@ -30,6 +30,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_venice_fallback(
             std::env::var("PATCHRIOT_VENICE_FALLBACK_ENABLED").as_deref() == Ok("true"),
         )
+        .with_inference_routing(
+            std::env::var("PATCHRIOT_INFERENCE_PRIMARY_MODEL")
+                .ok()
+                .as_deref(),
+            std::env::var("PATCHRIOT_INFERENCE_SECONDARY_MODEL")
+                .ok()
+                .as_deref(),
+        )?
         .with_agent_attempt_seconds(seconds)?
         .with_live_requests_per_day(
             std::env::var("PATCHRIOT_LIVE_REQUESTS_PER_DAY")

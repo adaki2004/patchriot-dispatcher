@@ -848,6 +848,30 @@ pub async fn complete(
         {
             return Err(ApiError::bad("invalid_live_evidence"));
         }
+        if let Some(workflow) = &result.workflow {
+            let previous: Vec<(String, DbJson<WorkResult>)> = sqlx::query_as("SELECT role,result FROM review_steps WHERE review_id=$1 AND state='completed' AND position<(SELECT position FROM review_steps WHERE id=$2) ORDER BY position")
+                .bind(lease.review_id).bind(lease.step_id).fetch_all(&mut *tx).await?;
+            let previous = previous
+                .into_iter()
+                .filter_map(|(name, saved)| {
+                    let WorkResult::Pentest(saved) = saved.0 else {
+                        return None;
+                    };
+                    Some(Ok(patchriot_protocol::pentests::PriorPentestReport {
+                        role: match role(&name) {
+                            Ok(role) => role,
+                            Err(error) => return Some(Err(error)),
+                        },
+                        assessment: saved.assessment,
+                        evidence: saved.evidence,
+                        tool_runs: saved.tool_runs,
+                    }))
+                })
+                .collect::<Result<Vec<_>, ApiError>>()?;
+            if !workflow.valid_reuse(&context.scope, role(&lease.role)?, &previous) {
+                return Err(ApiError::bad("invalid_live_workflow_reuse"));
+            }
+        }
         (
             None,
             Some(result.evidence_complete_for_role(&context.scope, role(&lease.role)?)),

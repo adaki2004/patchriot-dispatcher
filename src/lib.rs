@@ -33,6 +33,7 @@ pub struct AppState {
     agent_attempt_seconds: u64,
     compute_group_concurrency: u8,
     live_requests_per_day: u16,
+    live_reviews_per_requester: u8,
     credential_vault: Option<Arc<credentials::Vault>>,
     owned_test_origins: Arc<[String]>,
     near_check: Option<report_checks::NearCheck>,
@@ -65,6 +66,7 @@ impl AppState {
             agent_attempt_seconds: patchriot_protocol::DEFAULT_AGENT_ATTEMPT_SECONDS,
             compute_group_concurrency: 1,
             live_requests_per_day: 10,
+            live_reviews_per_requester: 3,
             credential_vault: None,
             owned_test_origins: Arc::from([]),
             near_check: None,
@@ -100,6 +102,16 @@ impl AppState {
             return Err("live requests per day must be 1..100");
         }
         self.live_requests_per_day = limit;
+        Ok(self)
+    }
+
+    /// Waiting reviews may need more queue slots than the host has execution
+    /// slots. This changes admission only; workers keep their concurrency cap.
+    pub fn with_live_reviews_per_requester(mut self, limit: u8) -> Result<Self, &'static str> {
+        if !(1..=30).contains(&limit) {
+            return Err("live reviews per requester must be 1..30");
+        }
+        self.live_reviews_per_requester = limit;
         Ok(self)
     }
 

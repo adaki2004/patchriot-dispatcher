@@ -37,6 +37,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .parse::<u16>()
                 .map_err(|_| "PATCHRIOT_LIVE_REQUESTS_PER_DAY must be 1..100")?,
         )?
+        .with_live_reviews_per_requester(
+            std::env::var("PATCHRIOT_LIVE_REVIEWS_PER_REQUESTER")
+                .unwrap_or_else(|_| "3".into())
+                .parse::<u8>()
+                .map_err(|_| "PATCHRIOT_LIVE_REVIEWS_PER_REQUESTER must be 1..30")?,
+        )?
         .with_compute_group_concurrency(
             std::env::var("PATCHRIOT_COMPUTE_GROUP_CONCURRENCY")
                 .unwrap_or_else(|_| "1".into())

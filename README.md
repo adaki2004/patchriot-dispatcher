@@ -29,7 +29,7 @@ flowchart LR
 
 ## What customers see
 
-A URL, domain verification, the named team, progress and a downloadable report. New live reviews require Scout and Recon; the reserved third reviewer joins when the evidence warrants it. Existing reviews keep their saved rules.
+A URL, domain verification, the named team, progress and a downloadable report. New live reviews use Scout for the full scoped investigation and Recon for targeted validation; no third role is added. Existing reviews keep their saved rules.
 
 This repository is private while we develop the service. That is a development choice, not a security boundary: authenticated calls, exact scope checks and isolation protect the running system. Customer data and secrets are never repository content.
 
@@ -55,7 +55,7 @@ The verifier uses the host’s DNS resolver. Permit DNS egress and configure a t
 
 By default every live test needs DNS proof. For development, set `PATCHRIOT_OWNED_TEST_ORIGINS` to a JSON array of exact HTTPS origins you own or have explicit permission to test, for example `["https://staging.example.com"]`. Wildcards, paths, duplicate entries and implicit subdomains are refused. Keep this list short and remove it after testing.
 
-A signed-in administrator can then open the request and choose **Staff: authorize our owned test site**, recording the owner's permission. Core forwards the write to `POST /internal/pentests/:id/authorize-owned-test` with the exact `scope_sha256` and a `note`. The database records the staff identity, time and note separately from DNS evidence. The request belongs to its original owner; consent, three approved agents, payment and all network restrictions still apply. No work is created by authorization. Repeating a grant preserves its original expiry, at most 24 hours. Before checkout, a changed scope clears the grant and needs a fresh explicit authorization. After checkout, changes require a new request.
+A signed-in administrator can then open the request and choose **Staff: authorize our owned test site**, recording the owner's permission. Core forwards the write to `POST /internal/pentests/:id/authorize-owned-test` with the exact `scope_sha256` and a `note`. The database records the staff identity, time and note separately from DNS evidence. The request belongs to its original owner; consent, the approved team, payment and all network restrictions still apply. No work is created by authorization. Repeating a grant preserves its original expiry, at most 24 hours. Before checkout, a changed scope clears the grant and needs a fresh explicit authorization. After checkout, changes require a new request.
 
 Removing the configuration stops new grants. Revoke an existing request through its normal decision endpoint to stop waiting/running work and evidence access. An expired or revoked grant cannot be revived. Neither the agent gateway nor a member account can issue these grants. Deploy dispatcher and gateway with migration 22 before updating core.
 
@@ -78,7 +78,7 @@ Keep `patchriot-core` beside this repository for the Apache-2.0 protocol crate. 
 | `PATCHRIOT_AUDIENCE` | Stable deployment identifier, e.g. `patchriot-local-v1` |
 | `PATCHRIOT_BIND` | Optional listener; default `127.0.0.1:7411` |
 | `PATCHRIOT_RELAY_BIND` | Optional agent-only listener for Tailscale Serve, e.g. `127.0.0.1:7412`; requires both listeners on loopback |
-| `PATCHRIOT_AGENT_ATTEMPT_SECONDS` | Optional agent limit: `600` by default, at most `3600` |
+| `PATCHRIOT_AGENT_ATTEMPT_SECONDS` | Optional agent limit: `600` by default, at most `10800` |
 | `PATCHRIOT_JEV_OPENROUTER_KEY` | Optional server-only OpenRouter key for consented request screening |
 | `PATCHRIOT_NEAR_AI_KEY` | Optional server-only NEAR AI key for requester-approved report consistency checks |
 
@@ -403,7 +403,7 @@ Live candidates may declare `abliterated-model-large-v2` (Abliteration) or `abli
 
 ### Conditional live review
 
-Live review plans offer `investigate_verify_v1`: two required roles plus a third for serious findings, disagreement, unchecked claims or incomplete evidence. All three devices are named and checked at consent/funding; only the first two jobs are created initially. After their reports arrive, one completion transaction records the decision and, if necessary, queues the reserved third device. Results and reasons remain private. Cancellation, permission expiry and revocation still stop work. An incomplete earlier stage is never hidden by a later result.
+New live plans offer `investigate_validate_v1`: two named devices, full investigation followed by targeted validation, with no third role. Migration 31 permits explicit allowances up to three hours per role; saved reservations remain unchanged. Older `investigate_verify_v1` requests keep two required roles plus a third for serious findings, disagreement, unchecked claims or incomplete evidence. All three devices are named and checked at consent/funding; only the first two jobs are created initially. After their reports arrive, one completion transaction records the decision and, if necessary, queues the reserved third device. Results and reasons remain private. Cancellation, permission expiry and revocation still stop work. An incomplete earlier stage is never hidden by a later result.
 
 Missing `review_policy` keeps the original three-role behavior, including existing paid orders. Snapshot and source reviews reject the live-only policy. Upgrade dispatcher and gateway before the new core checkout. The shared protocol defines the policy; there is no model vote that can change permissions, pricing or the selected team.
 

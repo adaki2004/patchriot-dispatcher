@@ -1806,7 +1806,7 @@ async fn a_hard_deadline_ends_work_even_with_a_recent_heartbeat_and_unexpired_so
 #[tokio::test]
 async fn configured_cpu_budget_is_saved_and_renewal_does_not_extend_it() {
     let mut app = TestApp::with_budget(3600).await;
-    for seconds in [0, 599, 3601, u64::MAX] {
+    for seconds in [0, 599, 10801, u64::MAX] {
         assert!(
             AppState::new(
                 app.pool.clone(),
@@ -1824,7 +1824,7 @@ async fn configured_cpu_budget_is_saved_and_renewal_does_not_extend_it() {
     assert_eq!(review.deadline_at - review.created_at, 11100);
     // The database also rejects an out-of-range allowance, independently of
     // configuration validation. A failed update must preserve the reservation.
-    let invalid = sqlx::query("UPDATE reviews SET agent_attempt_seconds=3601 WHERE id=$1")
+    let invalid = sqlx::query("UPDATE reviews SET agent_attempt_seconds=10801 WHERE id=$1")
         .bind(review.id)
         .execute(&app.pool)
         .await

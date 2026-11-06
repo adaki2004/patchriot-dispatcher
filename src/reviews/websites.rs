@@ -92,14 +92,18 @@ fn model_family(model: &str) -> String {
 }
 
 pub(super) fn recommend(candidates: &[Candidate], site: Uuid) -> Vec<Uuid> {
-    if candidates.len() < 3 {
+    recommend_count(candidates, site, 3)
+}
+
+pub(super) fn recommend_count(candidates: &[Candidate], site: Uuid, count: usize) -> Vec<Uuid> {
+    if candidates.len() < count {
         return Vec::new();
     }
     let mut chosen: Vec<&Candidate> = Vec::new();
     // Prefer different operators, declared machines and models, then lighter
     // queues. The per-site hash breaks ties without always picking the oldest
     // devices. Declarations are useful routing hints, not proof of independence.
-    for _ in 0..3 {
+    for _ in 0..count {
         let next = candidates
             .iter()
             .filter(|candidate| !chosen.iter().any(|selected| selected.id == candidate.id))

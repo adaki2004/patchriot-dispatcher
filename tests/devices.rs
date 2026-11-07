@@ -1897,3 +1897,96 @@ async fn admin_usage_counts_cover_the_full_history_without_reading_private_resul
     assert!(counts.get("results").is_none());
     test.finish().await;
 }
+
+#[tokio::test]
+async fn compressed_completion_checks_signatures_bounds_and_cross_transport_replay() {
+    use std::io::Write;
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+    async fn send(app: &TestApp, path: &str, body: Vec<u8>) -> (StatusCode, Value) {
+        let response = app
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/gzip")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+    let app = TestApp::new().await;
+    app.review(Uuid::new_v4()).await;
+    let key = DeviceKey::from_bytes(&[219; 32]);
+    let id = app.online(&key).await;
+    let assignment = app.work(&key, id, 1).await.unwrap();
+    let plain = format!("/v1/devices/{id}/work/complete");
+    let compressed = format!("{plain}-gzip");
+    let payload = CompleteWork {
+        lease_id: assignment.lease_id,
+        result: WorkResult::Fixture(fixture_result()),
+    };
+    let signed = sign(
+        &key,
+        "test-deployment",
+        &plain,
+        Utc::now().timestamp(),
+        &payload,
+    )
+    .unwrap();
+    let wrong_path = send(
+        &app,
+        &compressed,
+        gzip(&serde_json::to_vec(&signed).unwrap()),
+    )
+    .await;
+    assert_eq!(wrong_path.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(wrong_path.1["error"], "invalid_signature");
+    for body in [
+        b"not gzip".to_vec(),
+        gzip(b"not JSON"),
+        gzip(&vec![b' '; pentests::MAX_RESULT_BYTES + 8193]),
+    ] {
+        assert_eq!(
+            send(&app, &compressed, body).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        send(
+            &app,
+            &compressed,
+            vec![0; pentests::MAX_RESULT_BYTES + 8193]
+        )
+        .await
+        .0,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    let signed = sign(
+        &key,
+        "test-deployment",
+        &compressed,
+        Utc::now().timestamp(),
+        &payload,
+    )
+    .unwrap();
+    let bytes = gzip(&serde_json::to_vec(&signed).unwrap());
+    let first = send(&app, &compressed, bytes.clone()).await;
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    assert_eq!(first.1["replayed"], false);
+    assert_eq!(send(&app, &compressed, bytes).await.1["replayed"], true);
+    assert_eq!(app.signed(&key, &plain, payload).await.1["replayed"], true);
+    app.finish().await;
+}

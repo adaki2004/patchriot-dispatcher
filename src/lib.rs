@@ -228,6 +228,12 @@ fn device_routes() -> Router<AppState> {
             post(reviews::websites::evidence),
         )
         .route(
+            "/v1/devices/{id}/work/complete-gzip",
+            post(reviews::complete_gzip).layer(DefaultBodyLimit::max(
+                patchriot_protocol::pentests::MAX_RESULT_BYTES + 8192,
+            )),
+        )
+        .route(
             "/v1/devices/{id}/work/complete",
             post(reviews::complete).layer(DefaultBodyLimit::max(
                 patchriot_protocol::pentests::MAX_RESULT_BYTES + 8192,

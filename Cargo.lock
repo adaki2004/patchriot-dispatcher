@@ -2798,6 +2798,7 @@ dependencies = [
  "aes-gcm 0.11.1",
  "axum",
  "chrono",
+ "flate2",
  "futures-util",
  "getrandom 0.4.3",
  "hex",

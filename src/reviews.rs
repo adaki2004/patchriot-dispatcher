@@ -487,7 +487,7 @@ pub async fn poll(
     if seq == 0 || seq > i64::MAX as u64 {
         return Err(ApiError::bad("invalid_sequence"));
     }
-    if request.payload.live_tools.len() > 8
+    if request.payload.live_tools.len() > 9
         || request
             .payload
             .live_tools
@@ -711,11 +711,11 @@ pub async fn renew(
             "private_work_not_allowed",
         ));
     }
-    if device.paused
-        || device
-            .last_seen_at
-            .is_none_or(|seen| now() - seen.timestamp() >= 30)
-    {
+    // A signed renewal proves presence for this still-active lease. The shorter
+    // heartbeat freshness rule governs new assignments, and must not cancel an
+    // existing 60-second lease after a delayed heartbeat. active() above still
+    // enforces expiry, replacement and the fixed review/attempt deadline.
+    if device.paused {
         return Err(ApiError::conflict("device_not_ready"));
     }
     if (input.sequence as i64) < current.renewal_sequence {
@@ -847,6 +847,30 @@ pub async fn complete(
             || device.introduction.declared_model.as_deref() != Some(&result.execution.model)
         {
             return Err(ApiError::bad("invalid_live_evidence"));
+        }
+        if let Some(workflow) = &result.workflow {
+            let previous: Vec<(String, DbJson<WorkResult>)> = sqlx::query_as("SELECT role,result FROM review_steps WHERE review_id=$1 AND state='completed' AND position<(SELECT position FROM review_steps WHERE id=$2) ORDER BY position")
+                .bind(lease.review_id).bind(lease.step_id).fetch_all(&mut *tx).await?;
+            let previous = previous
+                .into_iter()
+                .filter_map(|(name, saved)| {
+                    let WorkResult::Pentest(saved) = saved.0 else {
+                        return None;
+                    };
+                    Some(Ok(patchriot_protocol::pentests::PriorPentestReport {
+                        role: match role(&name) {
+                            Ok(role) => role,
+                            Err(error) => return Some(Err(error)),
+                        },
+                        assessment: saved.assessment,
+                        evidence: saved.evidence,
+                        tool_runs: saved.tool_runs,
+                    }))
+                })
+                .collect::<Result<Vec<_>, ApiError>>()?;
+            if !workflow.valid_reuse(&context.scope, role(&lease.role)?, &previous) {
+                return Err(ApiError::bad("invalid_live_workflow_reuse"));
+            }
         }
         (
             None,

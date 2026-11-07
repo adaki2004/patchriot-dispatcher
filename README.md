@@ -29,9 +29,13 @@ flowchart LR
 
 ## What customers see
 
-A URL, domain verification, the named team, progress and a downloadable report. New live reviews require Scout and Recon; the reserved third reviewer joins when the evidence warrants it. Existing reviews keep their saved rules.
+A URL, domain verification, the named team, progress and a downloadable report. New live reviews use Scout for the full scoped investigation and Recon for targeted validation; no third role is added. Existing reviews keep their saved rules.
 
 This repository is private while we develop the service. That is a development choice, not a security boundary: authenticated calls, exact scope checks and isolation protect the running system. Customer data and secrets are never repository content.
+
+Optional two-account scopes bind the testing/reference distinction and password-change permission into the consent hash. Both credentials remain in the existing encrypted credential vault. Admission requires the pair to match that scope and a runner advertising `multi_account_v1`. Migration 32 permits the additional advertised capability. The relay enforces separate sessions and the limited testing-account mutation permission. Changing these permissions requires fresh scope consent.
+
+Shared protocol validation accepts the additional scoped scanner receipts and verifies evidence-indexed coverage records. Deploy compatible core and dispatcher readers before adapter 21 runners. Existing receipts remain readable. Tool observations and deferred coverage are retained separately from validated findings.
 
 ## Operating reference
 
@@ -55,7 +59,7 @@ The verifier uses the host’s DNS resolver. Permit DNS egress and configure a t
 
 By default every live test needs DNS proof. For development, set `PATCHRIOT_OWNED_TEST_ORIGINS` to a JSON array of exact HTTPS origins you own or have explicit permission to test, for example `["https://staging.example.com"]`. Wildcards, paths, duplicate entries and implicit subdomains are refused. Keep this list short and remove it after testing.
 
-A signed-in administrator can then open the request and choose **Staff: authorize our owned test site**, recording the owner's permission. Core forwards the write to `POST /internal/pentests/:id/authorize-owned-test` with the exact `scope_sha256` and a `note`. The database records the staff identity, time and note separately from DNS evidence. The request belongs to its original owner; consent, three approved agents, payment and all network restrictions still apply. No work is created by authorization. Repeating a grant preserves its original expiry, at most 24 hours. Before checkout, a changed scope clears the grant and needs a fresh explicit authorization. After checkout, changes require a new request.
+A signed-in administrator can then open the request and choose **Staff: authorize our owned test site**, recording the owner's permission. Core forwards the write to `POST /internal/pentests/:id/authorize-owned-test` with the exact `scope_sha256` and a `note`. The database records the staff identity, time and note separately from DNS evidence. The request belongs to its original owner; consent, the approved team, payment and all network restrictions still apply. No work is created by authorization. Repeating a grant preserves its original expiry, at most 24 hours. Before checkout, a changed scope clears the grant and needs a fresh explicit authorization. After checkout, changes require a new request.
 
 Removing the configuration stops new grants. Revoke an existing request through its normal decision endpoint to stop waiting/running work and evidence access. An expired or revoked grant cannot be revived. Neither the agent gateway nor a member account can issue these grants. Deploy dispatcher and gateway with migration 22 before updating core.
 
@@ -78,7 +82,7 @@ Keep `patchriot-core` beside this repository for the Apache-2.0 protocol crate. 
 | `PATCHRIOT_AUDIENCE` | Stable deployment identifier, e.g. `patchriot-local-v1` |
 | `PATCHRIOT_BIND` | Optional listener; default `127.0.0.1:7411` |
 | `PATCHRIOT_RELAY_BIND` | Optional agent-only listener for Tailscale Serve, e.g. `127.0.0.1:7412`; requires both listeners on loopback |
-| `PATCHRIOT_AGENT_ATTEMPT_SECONDS` | Optional agent limit: `600` by default, at most `3600` |
+| `PATCHRIOT_AGENT_ATTEMPT_SECONDS` | Optional agent limit: `600` by default, at most `10800` |
 | `PATCHRIOT_JEV_OPENROUTER_KEY` | Optional server-only OpenRouter key for consented request screening |
 | `PATCHRIOT_NEAR_AI_KEY` | Optional server-only NEAR AI key for requester-approved report consistency checks |
 
@@ -134,6 +138,8 @@ The pinned [NEAR AI Rust SDK](https://docs.near.ai/cloud/inference-sdk/rust) che
 
 Checks run one at a time with a three-minute timeout and up to 8,192 output tokens, including the model's reasoning. Truncated answers remain unverified even when their visible JSON is valid. The provider key stays in dispatcher, never the agent gateway, browser or relay. The receipt follows the report's fixed 12-hour deletion clock, including queued inputs and late responses. Deploy migration 25 before the matching core UI; no relay update is required for this feature.
 
+Adapter 16 can attach a versioned structured checklist to progress and final reports. Terminal public-stage outcomes require anonymous HTTP references and successful tool receipts; verified access cannot hide public gaps. Reused stages are checked against the saved earlier assignment's receipts and approved origins before admission. Missing/failed/truncated records cannot be promoted to completed reuse. Historical results without the optional field retain their format and legacy completeness policy. Deploy matching core, dispatcher/gateway, relay binary, then the rebuilt adapter 16 image; older readers reject the new field. These changes have local fixture coverage, not a new live benchmark.
+
 Live testing uses one discovery pass followed by targeted reproduction and review. With relay adapter 9, only Scout must run the requested ARTEX engine. Later roles still need their own request evidence, a usable assessment, confirmed cleanup and any required authenticated/anonymous access checks. The dispatcher takes the role from its saved assignment. An incomplete Scout leaves the overall review incomplete; a failed engine run from an older follow-up worker also stays incomplete. Deploy this dispatcher before upgrading the relay image. Existing scopes and saved reports keep their format.
 
 JEV is an optional, separate scope-screening call through OpenRouter. It receives only the consented scope and permission note, and cannot approve work or change tool permissions. Its decisions API is not interchangeable with a chat-completions model.
@@ -171,7 +177,7 @@ The private device list includes `reports_received`, derived from completed leas
 
 **Report retention:** core sends an authenticated `POST /internal/reviews/:id/download` with `{}` when a user explicitly exports a finished report. The first requester export sets a fixed twelve-hour deadline. Replays preserve it; staff exports and ordinary reads do not start it. After expiry all private report reads omit findings and evidence, and the existing 30-second cleanup task removes results and progress even with no browser/device traffic. A small work receipt keeps execution counts, model, scope/snapshot hash and completion metadata for payment accounting. Permission, job and payment records stay intact. Delivery retries cannot restore deleted results. Migration 23 applies the clock only after an explicit export, including older saved reports. PDFs/Markdown are browser-generated and have no separate stored copy. Operators must set their database backup/recovery retention separately; application deletion does not erase historical backups.
 
-Live reports accept at most 4 MiB of compact JSON per role. The signed completion route adds a small envelope allowance; larger results are rejected before storage. Later roles can receive both preceding reports, and private detail reads can return all three. List responses contain no result bodies. Deploy core and dispatcher/gateway with these limits before upgrading relays; existing saved reports remain unchanged.
+Live reports accept at most 8 MiB of compact JSON per role. The signed completion route adds a small envelope allowance; larger results are rejected before storage. Later roles can receive both preceding reports, and private detail reads can return all three. List responses contain no result bodies. Deploy core and dispatcher/gateway with these limits before upgrading relays; existing saved reports remain unchanged.
 
 ```mermaid
 flowchart LR
@@ -197,7 +203,7 @@ For a slow CPU pilot, `PATCHRIOT_AGENT_ATTEMPT_SECONDS=3600` permits 60 minutes 
 
 On a shared machine, the scheduler selects the oldest ready request across its assigned devices, regardless of which device polls first. Paid requests enter this order at funding; unpaid reservations receive no assignment. Paused, offline or incompatible assigned devices do not block unrelated ready work. The existing device/operator/compute-group lease prevents simultaneous assignments; no new instance or substitute operator is created. Review detail returns the number of earlier requests sharing its pending machines, without their identities or targets, plus the actual start and active-role deadline. Deploy dispatcher and gateway before using the new timing display in core.
 
-Renewal requires a signed, increasing sequence, a current assignment and fresh, unpaused presence. Duplicate renewals return the existing expiry and remaining time; they do not add time. Cancellation, expiry and revocation stop renewal. Clients must use a monotonic deadline and stop before losing the lease, including during a network outage.
+Renewal requires a signed, increasing sequence, a current unexpired assignment and an approved, unpaused device. A fresh signed renewal proves presence for that lease. Heartbeat freshness controls admission to new assignments. Duplicate renewals return the existing expiry and remaining time. Cancellation, expiry and revocation stop renewal. Clients use a monotonic deadline and stop before losing the lease, including during a network outage.
 
 All three checks must report the expected results to complete. Agent prose alone cannot pass: the result needs the original/fixed terminal observations, model-call count and confirmed cleanup. Missing or contradictory evidence produces **needs_review**. Cancellation and revocation reject late results; superseded attempts cannot complete replacements. Expiry is processed during polling and authorized queue reads. Shared-host/operator identities remain visible; model names and digests are declarations, not attestations.
 
@@ -401,7 +407,7 @@ Live candidates may declare `abliterated-model-large-v2` (Abliteration) or `abli
 
 ### Conditional live review
 
-Live review plans offer `investigate_verify_v1`: two required roles plus a third for serious findings, disagreement, unchecked claims or incomplete evidence. All three devices are named and checked at consent/funding; only the first two jobs are created initially. After their reports arrive, one completion transaction records the decision and, if necessary, queues the reserved third device. Results and reasons remain private. Cancellation, permission expiry and revocation still stop work. An incomplete earlier stage is never hidden by a later result.
+New live plans offer `investigate_validate_v1`: two named devices, full investigation followed by targeted validation, with no third role. Migration 31 permits explicit allowances up to three hours per role; saved reservations remain unchanged. Older `investigate_verify_v1` requests keep two required roles plus a third for serious findings, disagreement, unchecked claims or incomplete evidence. All three devices are named and checked at consent/funding; only the first two jobs are created initially. After their reports arrive, one completion transaction records the decision and, if necessary, queues the reserved third device. Results and reasons remain private. Cancellation, permission expiry and revocation still stop work. An incomplete earlier stage is never hidden by a later result.
 
 Missing `review_policy` keeps the original three-role behavior, including existing paid orders. Snapshot and source reviews reject the live-only policy. Upgrade dispatcher and gateway before the new core checkout. The shared protocol defines the policy; there is no model vote that can change permissions, pricing or the selected team.
 

@@ -487,7 +487,7 @@ pub async fn poll(
     if seq == 0 || seq > i64::MAX as u64 {
         return Err(ApiError::bad("invalid_sequence"));
     }
-    if request.payload.live_tools.len() > 8
+    if request.payload.live_tools.len() > 9
         || request
             .payload
             .live_tools

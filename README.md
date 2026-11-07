@@ -33,6 +33,8 @@ A URL, domain verification, the named team, progress and a downloadable report. 
 
 This repository is private while we develop the service. That is a development choice, not a security boundary: authenticated calls, exact scope checks and isolation protect the running system. Customer data and secrets are never repository content.
 
+Optional two-account scopes bind the testing/reference distinction and password-change permission into the consent hash. Both credentials remain in the existing encrypted credential vault. Admission requires the pair to match that scope and a runner advertising `multi_account_v1`. Migration 32 permits the additional advertised capability. The relay enforces separate sessions and the limited testing-account mutation permission. Changing these permissions requires fresh scope consent.
+
 ## Operating reference
 
 > **DON’T TRUST! VERIFY!** Review the implementation and test its permission checks before using your own deployment. Model confidence and signed reports do not prove a finding.

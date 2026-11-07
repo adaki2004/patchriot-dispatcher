@@ -1558,7 +1558,7 @@ async fn renewal_replay_is_read_only_and_fresh_sequences_stop_at_the_fixed_deadl
 }
 
 #[tokio::test]
-async fn renewal_cannot_revive_paused_stale_expired_replaced_cancelled_or_revoked_work() {
+async fn renewal_tolerates_delayed_heartbeats_while_enforcing_lease_and_device_controls() {
     let test = TestApp::new().await;
     let review = test.agent_review().await;
     let key = DeviceKey::from_bytes(&[76; 32]);
@@ -1601,14 +1601,14 @@ async fn renewal_cannot_revive_paused_stale_expired_replaced_cancelled_or_revoke
         },
     )
     .await;
-    sqlx::query("UPDATE devices SET last_seen_at = now() - interval '31 seconds' WHERE id = $1")
+    sqlx::query("UPDATE devices SET last_seen_at = now() - interval '40 seconds' WHERE id = $1")
         .bind(id)
         .execute(&test.pool)
         .await
         .unwrap();
     assert_eq!(
         test.renew(&key, id, first.lease_id, 1).await.0,
-        StatusCode::CONFLICT
+        StatusCode::OK
     );
     test.signed(
         &key,

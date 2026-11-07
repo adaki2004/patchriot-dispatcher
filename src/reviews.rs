@@ -711,11 +711,11 @@ pub async fn renew(
             "private_work_not_allowed",
         ));
     }
-    if device.paused
-        || device
-            .last_seen_at
-            .is_none_or(|seen| now() - seen.timestamp() >= 30)
-    {
+    // A signed renewal proves presence for this still-active lease. The shorter
+    // heartbeat freshness rule governs new assignments, and must not cancel an
+    // existing 60-second lease after a delayed heartbeat. active() above still
+    // enforces expiry, replacement and the fixed review/attempt deadline.
+    if device.paused {
         return Err(ApiError::conflict("device_not_ready"));
     }
     if (input.sequence as i64) < current.renewal_sequence {

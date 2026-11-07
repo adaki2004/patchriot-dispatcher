@@ -35,6 +35,8 @@ This repository is private while we develop the service. That is a development c
 
 Optional two-account scopes bind the testing/reference distinction and password-change permission into the consent hash. Both credentials remain in the existing encrypted credential vault. Admission requires the pair to match that scope and a runner advertising `multi_account_v1`. Migration 32 permits the additional advertised capability. The relay enforces separate sessions and the limited testing-account mutation permission. Changing these permissions requires fresh scope consent.
 
+Shared protocol validation accepts the additional scoped scanner receipts and verifies evidence-indexed coverage records. Deploy compatible core and dispatcher readers before adapter 21 runners. Existing receipts remain readable. Tool observations and deferred coverage are retained separately from validated findings.
+
 ## Operating reference
 
 > **DON’T TRUST! VERIFY!** Review the implementation and test its permission checks before using your own deployment. Model confidence and signed reports do not prove a finding.

@@ -136,7 +136,7 @@ async fn views(
                       AND earlier.state IN ('queued','running')
                       AND mine.state IN ('queued','leased') AND mine.ready_at IS NOT NULL
                       AND other.state IN ('queued','leased') AND other.ready_at IS NOT NULL
-                      AND (other.ready_at,earlier.id)<(mine.ready_at,current.id)
+                      AND (COALESCE(earlier.funded_at,earlier.created_at),earlier.id)<(COALESCE(current.funded_at,current.created_at),current.id)
                       AND EXISTS(
                         SELECT 1 FROM jsonb_array_elements(current.pentest_context->'reviewers') mine_worker,
                                       jsonb_array_elements(earlier.pentest_context->'reviewers') other_worker
@@ -511,6 +511,9 @@ async fn next_live_step(
     device: &Worker,
     tools: &[patchriot_protocol::pentests::LiveToolProfile],
 ) -> Result<Option<Uuid>, ApiError> {
+    // Ready follow-up roles inherit their audit's admission time. An older audit
+    // can finish before a newer Scout starts, without reserving an unavailable
+    // worker or letting a worker validate its own investigation.
     let pinned = next_pinned_live_step(tx, id, device, tools).await?;
     let next: Option<Uuid> = sqlx::query_scalar(r#"
         SELECT s.id FROM review_steps s JOIN reviews r ON r.id=s.review_id
@@ -528,7 +531,7 @@ async fn next_live_step(
             AND NOT EXISTS(SELECT 1 FROM review_steps used JOIN work_leases l ON l.id=used.current_lease_id
                 WHERE used.review_id=r.id AND l.device_id::text=$2)
           ))
-        ORDER BY COALESCE(s.ready_at,r.funded_at,r.created_at), r.id, s.position
+        ORDER BY COALESCE(r.funded_at,r.created_at), r.id, s.position
         LIMIT 1 FOR UPDATE OF s
     "#).bind(pinned).bind(id.to_string()).bind(device.operator_id.to_string())
         .bind(&device.introduction.declared_model).bind(&device.introduction.compute_group)

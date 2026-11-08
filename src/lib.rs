@@ -221,11 +221,21 @@ fn device_routes() -> Router<AppState> {
             "/v1/devices/{id}/work/pentest-evidence",
             post(reviews::pentests::evidence),
         )
+        .route(
+            "/v1/devices/{id}/work/pentest-evidence-gzip",
+            post(reviews::pentests::evidence_gzip),
+        )
         .route("/v1/devices/{id}/work/poll", post(reviews::poll))
         .route("/v1/devices/{id}/work/renew", post(reviews::renew))
         .route(
             "/v1/devices/{id}/work/evidence",
             post(reviews::websites::evidence),
+        )
+        .route(
+            "/v1/devices/{id}/work/complete-gzip",
+            post(reviews::complete_gzip).layer(DefaultBodyLimit::max(
+                patchriot_protocol::pentests::MAX_RESULT_BYTES + 8192,
+            )),
         )
         .route(
             "/v1/devices/{id}/work/complete",

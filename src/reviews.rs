@@ -4,7 +4,8 @@
 use crate::{Actor, ApiError, AppState, actor, now, verify};
 use axum::{
     Json,
-    extract::{Path, State},
+    body::Bytes,
+    extract::{OriginalUri, Path, State},
     http::{HeaderMap, StatusCode},
 };
 use chrono::{DateTime, Utc};
@@ -745,12 +746,56 @@ pub async fn renew(
     }))
 }
 
+/// Compressed transport only; the decoded request uses the same DTO, signature
+/// verification, lease fencing and idempotent persistence as ordinary delivery.
+pub async fn complete_gzip(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    OriginalUri(uri): OriginalUri,
+    body: Bytes,
+) -> Result<Json<WorkAccepted>, ApiError> {
+    // Decode away from the async executor. Both compressed input (router) and
+    // expanded JSON are bounded, including highly compressible hostile input.
+    let request = tokio::task::spawn_blocking(move || decode_completion(&body))
+        .await
+        .map_err(|_| ApiError::bad("invalid_compressed_result"))??;
+    complete_request(state, id, uri.path(), request).await
+}
+
+fn decode_completion(body: &[u8]) -> Result<SignedRequest<CompleteWork>, ApiError> {
+    use std::io::Read;
+    let mut decoded = Vec::new();
+    flate2::read::GzDecoder::new(body)
+        .take((patchriot_protocol::pentests::MAX_RESULT_BYTES + 8193) as u64)
+        .read_to_end(&mut decoded)
+        .map_err(|_| ApiError::bad("invalid_compressed_result"))?;
+    if decoded.len() > patchriot_protocol::pentests::MAX_RESULT_BYTES + 8192 {
+        return Err(ApiError::bad("result_too_large"));
+    }
+    serde_json::from_slice(&decoded).map_err(|_| ApiError::bad("invalid_compressed_result"))
+}
+
 pub async fn complete(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(request): Json<SignedRequest<CompleteWork>>,
 ) -> Result<Json<WorkAccepted>, ApiError> {
-    verify(&request, &state, &format!("/v1/devices/{id}/work/complete"))?;
+    complete_request(
+        state,
+        id,
+        &format!("/v1/devices/{id}/work/complete"),
+        request,
+    )
+    .await
+}
+
+async fn complete_request(
+    state: AppState,
+    id: Uuid,
+    path: &str,
+    request: SignedRequest<CompleteWork>,
+) -> Result<Json<WorkAccepted>, ApiError> {
+    verify(&request, &state, path)?;
     let mut input = request.payload;
     if !matches!(input.result, WorkResult::Pentest(_))
         && serde_json::to_vec(&input)?.len() > 64 * 1024

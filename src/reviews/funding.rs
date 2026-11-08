@@ -96,8 +96,10 @@ pub(crate) async fn fund(
         .into_iter()
         .map(websites::Candidate::disclosure)
         .collect();
-        if ids.len() != 3
-            || ready.len() != 3
+        if !context
+            .review_policy
+            .valid_devices(&ids, context.use_worker_pool)
+            || ready.len() != ids.len()
             || context.reviewers.iter().any(|r| !ready.contains(r))
         {
             return Err(ApiError::conflict("selected_device_unavailable"));
@@ -150,6 +152,13 @@ pub(crate) async fn fund(
     }
     sqlx::query("UPDATE reviews SET state = 'queued', funded_invoice_id = $2, funded_at = $4, deadline_at = $3 WHERE id = $1")
         .bind(id).bind(input.invoice_id).bind(execution_deadline).bind(funded_at).execute(&mut *tx).await?;
+    sqlx::query(
+        "UPDATE review_steps SET ready_at=$2 WHERE review_id=$1 AND position=0 AND state='queued'",
+    )
+    .bind(id)
+    .bind(funded_at)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(Json(view(&state.pool, &caller, id).await?))
 }

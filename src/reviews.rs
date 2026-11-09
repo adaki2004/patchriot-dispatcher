@@ -549,13 +549,14 @@ pub async fn poll(
     if seq == 0 || seq > i64::MAX as u64 {
         return Err(ApiError::bad("invalid_sequence"));
     }
-    if request.payload.live_tools.len() > 9
-        || request
-            .payload
-            .live_tools
-            .iter()
-            .enumerate()
-            .any(|(i, t)| request.payload.live_tools[..i].contains(t))
+    // The enum permits only known tools and duplicates are rejected below.
+    // A separate count limit would reject workers when a new tool is added.
+    if request
+        .payload
+        .live_tools
+        .iter()
+        .enumerate()
+        .any(|(i, t)| request.payload.live_tools[..i].contains(t))
         || (!request.payload.live_tests && !request.payload.live_tools.is_empty())
     {
         return Err(ApiError::bad("invalid_live_tools"));

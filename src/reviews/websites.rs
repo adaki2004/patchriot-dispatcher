@@ -193,6 +193,7 @@ pub(super) async fn create_review(
 ) -> Result<ReviewView, ApiError> {
     if !input.accepts_operator_access
         || !input.review_policy.is_legacy()
+        || input.use_worker_pool
         || input.allows_venice_fallback
         || input.fallback_model.is_some()
         || input.device_ids.len() != 3

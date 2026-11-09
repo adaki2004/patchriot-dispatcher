@@ -22,7 +22,7 @@ impl Vault {
         }
         Ok(Self(key))
     }
-    fn seal(&self, aad: &[u8], input: &TestCredentials) -> Result<Vec<u8>, ApiError> {
+    pub(crate) fn seal(&self, aad: &[u8], input: &TestCredentials) -> Result<Vec<u8>, ApiError> {
         let mut bytes = [0u8; 12];
         getrandom::fill(&mut bytes).map_err(|_| unavailable())?;
         let plaintext = Zeroizing::new(serde_json::to_vec(input)?);
@@ -38,7 +38,7 @@ impl Vault {
             .map_err(|_| unavailable())?;
         Ok([bytes.as_slice(), encrypted.as_slice()].concat())
     }
-    fn open(&self, aad: &[u8], data: &[u8]) -> Result<TestCredentials, ApiError> {
+    pub(crate) fn open(&self, aad: &[u8], data: &[u8]) -> Result<TestCredentials, ApiError> {
         if !(28..=8192).contains(&data.len()) {
             return Err(unavailable());
         }
@@ -116,6 +116,8 @@ pub(crate) async fn sweep(tx: &mut Transaction<'_, Postgres>) -> Result<(), ApiE
     // A credential set is single-assessment. Never resurrect it by retrying a
     // cancelled or completed request. A new test needs fresh scope and consent.
     sqlx::query("DELETE FROM pentest_credentials c USING pentests p WHERE c.pentest_id=p.id AND (c.expires_at<=now() OR p.expires_at<=now() OR p.state IN ('rejected','revoked','expired') OR EXISTS (SELECT 1 FROM reviews r WHERE r.pentest_id=p.id AND r.state IN ('completed','needs_review','failed','cancelled')))")
+        .execute(&mut **tx).await?;
+    sqlx::query("UPDATE pentest_preparations x SET gate_ciphertext=NULL WHERE gate_ciphertext IS NOT NULL AND (expires_at<=now() OR EXISTS(SELECT 1 FROM pentests p WHERE p.id=x.pentest_id AND (p.expires_at<=now() OR p.state IN ('rejected','revoked','expired'))) OR EXISTS(SELECT 1 FROM reviews r WHERE r.request_id=x.request_id AND r.requester_id=x.requester_id AND r.state IN ('completed','needs_review','failed','cancelled')))")
         .execute(&mut **tx).await?;
     Ok(())
 }

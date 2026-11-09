@@ -68,7 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )?
                 .unwrap_or_default(),
         )?
-        .with_near_ai_key(std::env::var("PATCHRIOT_NEAR_AI_KEY").ok())?;
+        .with_near_ai_key(std::env::var("PATCHRIOT_NEAR_AI_KEY").ok())?
+        .with_context_screening(std::env::var("PATCHRIOT_JEV_OPENROUTER_KEY").ok())?;
     let jev = std::env::var("PATCHRIOT_JEV_OPENROUTER_KEY")
         .ok()
         .map(|key| screening::Jev::new(&key))

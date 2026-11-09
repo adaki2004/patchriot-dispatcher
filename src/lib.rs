@@ -35,6 +35,7 @@ pub struct AppState {
     live_requests_per_day: u16,
     live_reviews_per_requester: u8,
     credential_vault: Option<Arc<credentials::Vault>>,
+    context_screener: Option<Arc<screening::Jev>>,
     owned_test_origins: Arc<[String]>,
     near_check: Option<report_checks::NearCheck>,
     venice_fallback_enabled: bool,
@@ -70,6 +71,7 @@ impl AppState {
             live_requests_per_day: 10,
             live_reviews_per_requester: 3,
             credential_vault: None,
+            context_screener: None,
             owned_test_origins: Arc::from([]),
             near_check: None,
             venice_fallback_enabled: false,
@@ -147,6 +149,13 @@ impl AppState {
         }
         self.inference_primary = primary;
         self.inference_secondary = secondary;
+        Ok(self)
+    }
+
+    pub fn with_context_screening(mut self, key: Option<String>) -> Result<Self, &'static str> {
+        self.context_screener = key
+            .map(|key| screening::Jev::new(&key).map(Arc::new))
+            .transpose()?;
         Ok(self)
     }
 
@@ -329,6 +338,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/internal/pentest-tools", get(reviews::pentests::tools))
         .route("/internal/pentests/{id}", get(reviews::pentests::detail))
+        .route(
+            "/internal/pentests/{id}/prepare",
+            post(reviews::pentests::preparation::prepare),
+        )
         .route(
             "/internal/pentests/{id}/setup",
             post(reviews::pentests::update_setup),

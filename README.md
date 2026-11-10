@@ -59,7 +59,7 @@ The verifier uses the host’s DNS resolver. Permit DNS egress and configure a t
 
 In **Administration → Audit activity → Needs approval**, open a request with **Review ownership**. An administrator can approve it after independently confirming the requester's authority to test every listed origin. A reason is required. This applies to that request only; it neither creates a general domain exception nor starts or funds a test.
 
-Core sends `POST /internal/pentests/:id/authorize` with the current `scope_sha256` and `note`. Both services require an authenticated administrator; core also checks the request Origin and CSRF token. The existing database fields retain the admin identity, time and reason separately from DNS proof. Approval lasts at most 24 hours within the existing request expiry. Exact retries preserve the original record and deadline. Expired, rejected, revoked or changed requests cannot be approved from a stale screen. Customer scope changes require fresh approval; checkout, credentials, consent and payment remain with the requester. Normal revocation stops work as before.
+Core sends `POST /internal/pentests/:id/authorize` with the current `scope_sha256` and `note`. Both services require an authenticated administrator; core also checks the request Origin and CSRF token. The existing database fields retain the admin identity, time and reason separately from DNS proof. Approval lasts at most 24 hours within the existing request expiry. Exact retries preserve the original record and deadline. Expired, rejected, revoked or changed requests cannot be approved from a stale screen. Before checkout, the requester can change testing permissions for the same websites without another ownership approval; the original admin record and expiry stay unchanged. Adding or changing a target origin clears approval. Checkout, credentials, consent and payment remain with the requester. Normal revocation stops work as before.
 
 Deploy the dispatcher route before the core website. No migration or relay update is required. The older `authorize-owned-test` API below keeps its configured-origin restriction.
 
@@ -439,7 +439,7 @@ Legacy `PATCHRIOT_VENICE_FALLBACK_ENABLED=true` and `allows_venice_fallback` sti
 
 ### Editing setup before checkout
 
-`POST /internal/pentests/:id/setup` is requester-only and requires the current scope hash and fresh consent. The scheduler lock serializes edits with admission. Changed origins clear authorization and create fresh DNS challenges; same-origin changes retain current DNS proof without extending expiry. Changed permissions delete saved credentials. Any admitted assessment, including an unpaid or cancelled one, locks the setup.
+`POST /internal/pentests/:id/setup` is requester-only and requires the current scope hash and fresh consent. The scheduler lock serializes edits with admission. Changed origins clear authorization and create fresh DNS challenges; same-origin changes retain current DNS proof or admin ownership approval without extending expiry. POST still requires explicit consent to state changes. Changed permissions delete saved credentials. Any admitted assessment, including an unpaid or cancelled one, locks the setup.
 
 Production-risk consent uses `web_active_v2` and requires `active_web_v2` agents; existing V1 scopes retain their exact instructions and hashes. Deploy core before exposing new capabilities, then migration 27 on dispatcher/gateway, then adapter 12 relays. The extra capability is unavailable until enough eligible agents advertise it.
 

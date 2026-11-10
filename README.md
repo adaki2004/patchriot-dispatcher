@@ -55,13 +55,24 @@ The verifier uses the host’s DNS resolver. Permit DNS egress and configure a t
 </details>
 
 <details>
+<summary>Admin approval when DNS verification is unavailable</summary>
+
+In **Administration → Audit activity → Needs approval**, open a request with **Review ownership**. An administrator can approve it after independently confirming the requester's authority to test every listed origin. A reason is required. This applies to that request only; it neither creates a general domain exception nor starts or funds a test.
+
+Core sends `POST /internal/pentests/:id/authorize` with the current `scope_sha256` and `note`. Both services require an authenticated administrator; core also checks the request Origin and CSRF token. The existing database fields retain the admin identity, time and reason separately from DNS proof. Approval lasts at most 24 hours within the existing request expiry. Exact retries preserve the original record and deadline. Expired, rejected, revoked or changed requests cannot be approved from a stale screen. Customer scope changes require fresh approval; checkout, credentials, consent and payment remain with the requester. Normal revocation stops work as before.
+
+Deploy the dispatcher route before the core website. No migration or relay update is required. The older `authorize-owned-test` API below keeps its configured-origin restriction.
+
+</details>
+
+<details>
 <summary>Staff tests of owned sites</summary>
 
-By default every live test needs DNS proof. For development, set `PATCHRIOT_OWNED_TEST_ORIGINS` to a JSON array of exact HTTPS origins you own or have explicit permission to test, for example `["https://staging.example.com"]`. Wildcards, paths, duplicate entries and implicit subdomains are refused. Keep this list short and remove it after testing.
+Customers normally verify ownership with DNS. The legacy development API additionally restricts staff grants to `PATCHRIOT_OWNED_TEST_ORIGINS`, a JSON array of exact HTTPS origins you own or have explicit permission to test, for example `["https://staging.example.com"]`. Wildcards, paths, duplicate entries and implicit subdomains are refused. Keep this list short and remove it after testing. The admin back-office action above records permission per request and does not depend on this development setting.
 
-A signed-in administrator can then open the request and choose **Staff: authorize our owned test site**, recording the owner's permission. Core forwards the write to `POST /internal/pentests/:id/authorize-owned-test` with the exact `scope_sha256` and a `note`. The database records the staff identity, time and note separately from DNS evidence. The request belongs to its original owner; consent, the approved team, payment and all network restrictions still apply. No work is created by authorization. Repeating a grant preserves its original expiry, at most 24 hours. Before checkout, an admin requester saving fresh permissions for the same configured origins retains the original staff grant and expiry. A member changing a staff-authorized scope or any requester changing origins needs fresh authorization. After checkout, changes require a new request.
+Existing integrations may still call `POST /internal/pentests/:id/authorize-owned-test` with the exact `scope_sha256` and a `note`. The database records the staff identity, time and note separately from DNS evidence. The request belongs to its original owner; consent, the approved team, payment and all network restrictions still apply. No work is created by authorization. Repeating a grant preserves its original expiry, at most 24 hours. Before checkout, an admin requester saving fresh permissions for the same configured origins retains the original staff grant and expiry. A member changing a staff-authorized scope or any requester changing origins needs fresh authorization. After checkout, changes require a new request.
 
-Removing the configuration stops new grants. Revoke an existing request through its normal decision endpoint to stop waiting/running work and evidence access. An expired or revoked grant cannot be revived. Neither the agent gateway nor a member account can issue these grants. Deploy dispatcher and gateway with migration 22 before updating core.
+Removing this configuration stops new grants through the legacy endpoint. Revoke an existing request through its normal decision endpoint to stop waiting/running work and evidence access. An expired or revoked grant cannot be revived. Neither the agent gateway nor a member account can issue these grants. Deploy dispatcher and gateway with migration 22 before updating core.
 
 </details>
 

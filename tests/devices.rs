@@ -90,12 +90,17 @@ async fn signed_system_details_update_existing_agents_without_exposing_machine_i
     let key = DeviceKey::from_bytes(&[203; 32]);
     let id = test.online(&key).await;
     let path = format!("/v1/devices/{id}/heartbeat");
-    let system = AgentSystem {
+    let mut system = AgentSystem {
         os_name: "Kali GNU/Linux".into(),
         os_version: Some("2026.3".into()),
         architecture: "x86_64".into(),
         relay_version: "0.0.1".into(),
+        secondary_model: None,
     };
+    use patchriot_protocol::pentests::LiveProvider::{NearDeepSeek, VeniceDeepSeek};
+    sqlx::query("UPDATE devices SET introduction=jsonb_set(introduction,'{declared_model}',to_jsonb($2::text)) WHERE id=$1")
+        .bind(id).bind(NearDeepSeek.model()).execute(&test.pool).await.unwrap();
+    system.secondary_model = Some(VeniceDeepSeek.model().into());
     let mut heartbeat = Heartbeat {
         sequence: 2,
         paused: false,
@@ -116,6 +121,12 @@ async fn signed_system_details_update_existing_agents_without_exposing_machine_i
         StatusCode::CONFLICT
     );
     heartbeat.sequence = 3;
+    heartbeat.system.as_mut().unwrap().secondary_model = Some(NearDeepSeek.model().into());
+    assert_eq!(
+        test.signed(&key, &path, heartbeat.clone()).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    heartbeat.system.as_mut().unwrap().secondary_model = system.secondary_model.clone();
     heartbeat.system.as_mut().unwrap().os_name = "invalid\nname".into();
     assert_eq!(
         test.signed(&key, &path, heartbeat.clone()).await.0,

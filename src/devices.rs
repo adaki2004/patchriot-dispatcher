@@ -455,6 +455,23 @@ pub async fn heartbeat(
     if row.public_key != request.public_key {
         return Err(ApiError::denied());
     }
+    if let Some(secondary) = input
+        .system
+        .as_ref()
+        .and_then(|s| s.secondary_model.as_deref())
+    {
+        use patchriot_protocol::pentests::LiveProvider;
+        if !row
+            .introduction
+            .declared_model
+            .as_deref()
+            .and_then(LiveProvider::from_model)
+            .zip(LiveProvider::from_model(secondary))
+            .is_some_and(|(primary, backup)| primary.permits_secondary(backup))
+        {
+            return Err(ApiError::bad("invalid_secondary_model"));
+        }
+    }
     if row.approval == "revoked" {
         return Err(ApiError::new(StatusCode::FORBIDDEN, "device_revoked"));
     }

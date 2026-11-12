@@ -422,9 +422,13 @@ New live plans offer `investigate_validate_v1`: two named devices, full investig
 
 Missing `review_policy` keeps the original three-role behavior, including existing paid orders. Snapshot and source reviews reject the live-only policy. Upgrade dispatcher and gateway before the new core checkout. The shared protocol defines the policy; there is no model vote that can change permissions, pricing or the selected team.
 
-### NEAR recovery through Venice
+### Primary provider and backup
 
 For new requests, `PATCHRIOT_INFERENCE_PRIMARY_MODEL` optionally limits selection to approved devices declaring that model. `PATCHRIOT_INFERENCE_SECONDARY_MODEL` optionally offers the other supported DeepSeek provider as a backup. Both NEAR → Venice and Venice → NEAR are supported; omit secondary to disable fallback. Supported models are `deepseek-ai/DeepSeek-V4.1-Flash-1017-abliterated` and `deepseek-v4-1-flash-1017-uncensored`. A secondary without a primary, an unknown model or an unsupported pair stops startup. No new route order is assumed when both settings are absent.
+
+Alternatively, `PATCHRIOT_INFERENCE_BALANCED_POOLS=true` selects one provider pool per new assessment. It prefers less outstanding work per eligible device, with a stable request-ID tie break. Each available pool needs at least two approved, recently polling agents reporting the reciprocal backup. This does not guarantee an equal number of requests or provider uptime. Do not combine it with fixed routing or the legacy fallback flag; conflicting settings stop startup. Leave it off until the gateway and relays report the new optional `system.secondary_model` field. No database migration is needed.
+
+Backup metadata is signed by the device but remains self-reported configuration. The gateway validates the provider pair; checkout permission and the relay's credential checks remain separate. Missing backup metadata is shown as unknown and excluded from balanced selection. Busy heartbeats preserve the last ordinary metadata report. Existing assignments and consent are unchanged when routing settings change.
 
 Configure matching primary credentials and optional `secondary_model` / `secondary_key_file` on the relays before offering the route. Settings are private deployment configuration. Existing paired model declarations cannot change; switching to a new primary needs approved devices for that model. Do not retire devices with queued work. Deploy core, dispatcher/gateway and relay before enabling the new settings; older services cannot accept the new consent/model.
 

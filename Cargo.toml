@@ -11,7 +11,7 @@ publish = false
 flate2 = "1"
 axum = "0.8.9"
 chrono = { version = "0.4", features = ["serde"] }
-hickory-resolver = { version = "0.26.3", default-features = false, features = ["tokio", "system-config"] }
+hickory-resolver = { version = "0.26.3", default-features = false, features = ["tokio", "https-aws-lc-rs", "dnssec-aws-lc-rs", "webpki-roots"] }
 patchriot-protocol = { path = "../patchriot-core/crates/protocol" }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 scraper = { version = "0.27", default-features = false }

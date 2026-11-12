@@ -339,6 +339,15 @@ impl TestApp {
             .unwrap()
     }
 
+    // Owned test runtimes explicitly approved by the fixture administrator.
+    fn checked_capabilities() -> Value {
+        json!({"website_reviews":true,"source_reviews":true,"live_tests":true,
+            "live_tools":["scoped_discovery_v1","active_web_v1","active_web_v2",
+                "authenticated_http_v1","session_login_v1","form_discovery_v1",
+                "wallet_login_v1","browser_login_v1","multi_account_v1",
+                "run_context_v1","deep_checks_v1"]})
+    }
+
     async fn approve(&self, id: Uuid) {
         let (status, body) = self
             .request(

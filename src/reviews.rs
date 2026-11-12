@@ -30,8 +30,46 @@ pub(crate) async fn scheduler(tx: &mut Tx<'_>) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Evidence is confidential even when its signed read is otherwise idempotent.
+/// Consume one nonce atomically with lease checks; retries sign a fresh nonce.
+async fn consume_evidence_nonce(
+    tx: &mut Tx<'_>,
+    device: Uuid,
+    nonce: Uuid,
+) -> Result<(), ApiError> {
+    if nonce.is_nil() {
+        return Err(ApiError::bad("invalid_evidence_nonce"));
+    }
+    let recent: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM evidence_read_nonces WHERE device_id=$1 AND expires_at>clock_timestamp()",
+    )
+    .bind(device)
+    .fetch_one(&mut **tx)
+    .await?;
+    if recent >= 64 {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "evidence_read_limit",
+        ));
+    }
+    // Retain through the whole signature window, including future clock skew.
+    // Use insertion time, not the transaction's start before waiting for its lock.
+    let retention = SIGNATURE_MAX_AGE_SECONDS + SIGNATURE_MAX_FUTURE_SECONDS + 1;
+    let saved = sqlx::query("INSERT INTO evidence_read_nonces(device_id,nonce,expires_at) VALUES($1,$2,clock_timestamp()+$3*interval '1 second') ON CONFLICT DO NOTHING")
+        .bind(device).bind(nonce).bind(retention).execute(&mut **tx).await?.rows_affected();
+    if saved != 1 {
+        return Err(ApiError::conflict("evidence_request_replayed"));
+    }
+    Ok(())
+}
+
 pub(crate) async fn sweep(tx: &mut Tx<'_>) -> Result<(), ApiError> {
     retention::purge(tx).await?;
+    sqlx::query("DELETE FROM evidence_read_nonces WHERE expires_at<=now()")
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("UPDATE reviews r SET state='failed' WHERE r.mode IN ('website_agent','source_agent','pentest_agent') AND r.state IN ('queued','running') AND EXISTS(SELECT 1 FROM review_steps s JOIN devices d ON d.id=s.assigned_device_id WHERE s.review_id=r.id AND s.state IN ('queued','leased') AND (NOT (d.approved_capabilities->>(CASE r.mode WHEN 'website_agent' THEN 'website_reviews' WHEN 'source_agent' THEN 'source_reviews' ELSE 'live_tests' END))::boolean OR (r.mode='pentest_agent' AND NOT (d.approved_capabilities->'live_tools' @> COALESCE(r.pentest_context->'scope'->'tools','[]'::jsonb)))))")
+        .execute(&mut **tx).await?;
     crate::sources::sweep(tx).await?;
     sqlx::query("UPDATE reviews r SET state='failed' WHERE r.mode='pentest_agent' AND r.state IN ('awaiting_payment','queued','running') AND r.pentest_context->'scope'->>'authentication' IS NOT NULL AND NOT EXISTS(SELECT 1 FROM pentest_credentials c WHERE c.pentest_id=r.pentest_id AND c.expires_at>now())").execute(&mut **tx).await?;
     sqlx::query("UPDATE reviews r SET state = 'failed' WHERE r.mode = 'pentest_agent' AND r.state IN ('queued','running') AND (EXISTS (SELECT 1 FROM review_steps s JOIN devices d ON d.id = s.assigned_device_id WHERE s.review_id = r.id AND (d.approval <> 'approved' OR NOT d.private_work_approved)) OR NOT EXISTS (SELECT 1 FROM pentests p WHERE p.id = r.pentest_id AND p.state = 'approved' AND (p.ownership_verified_at IS NOT NULL OR p.staff_authorized_at IS NOT NULL) AND p.expires_at > now()))")
@@ -400,6 +438,7 @@ struct Worker {
     introduction: DbJson<DeviceIntroduction>,
     approval: String,
     private_work_approved: bool,
+    approved_capabilities: DbJson<WorkCapabilities>,
     website_reviews: bool,
     source_reviews: bool,
     live_tests: bool,
@@ -411,7 +450,7 @@ struct Worker {
 }
 
 async fn worker(tx: &mut Tx<'_>, id: Uuid, key: &str) -> Result<Worker, ApiError> {
-    let worker = sqlx::query_as::<_, Worker>("SELECT public_key, operator_id, introduction, approval, private_work_approved, website_reviews, source_reviews, live_tests, live_tools, paused, last_seen_at, work_sequence, work_reply FROM devices WHERE id = $1 FOR UPDATE")
+    let worker = sqlx::query_as::<_, Worker>("SELECT public_key, operator_id, introduction, approval, private_work_approved, approved_capabilities, website_reviews, source_reviews, live_tests, live_tools, paused, last_seen_at, work_sequence, work_reply FROM devices WHERE id = $1 FOR UPDATE")
         .bind(id).fetch_optional(&mut **tx).await?.ok_or_else(ApiError::missing)?;
     if worker.public_key != key {
         return Err(ApiError::denied());
@@ -482,12 +521,13 @@ async fn next_pinned_live_step(
         WHERE r.mode='pentest_agent' AND r.state IN ('queued','running')
           AND s.state='queued' AND r.deadline_at>now()
           AND d.operator_id=$2 AND d.introduction->>'compute_group'=$3
-          AND d.approval='approved' AND d.private_work_approved AND NOT d.paused
+          AND d.approval='approved' AND d.private_work_approved AND (d.approved_capabilities->>'live_tests')::boolean AND NOT d.paused
           AND d.last_seen_at>now()-interval '30 seconds'
           AND d.introduction->>'runtime'='hermes'
           AND d.introduction->>'declared_model'=ANY($5)
           AND (d.id=$1 OR (d.live_tests AND d.work_polled_at>now()-interval '30 seconds'))
           AND NOT EXISTS(SELECT 1 FROM work_leases busy WHERE busy.device_id=d.id AND busy.state='active')
+          AND d.approved_capabilities->'live_tools' @> COALESCE(r.pentest_context->'scope'->'tools','[]'::jsonb)
           AND (CASE WHEN d.id=$1 THEN $4::jsonb ELSE d.live_tools END)
               @> COALESCE(r.pentest_context->'scope'->'tools','[]'::jsonb)
           AND NOT EXISTS(SELECT 1 FROM review_steps previous
@@ -588,13 +628,13 @@ pub async fn poll(
         return Err(ApiError::bad("live_model_not_supported"));
     }
     if device.private_work_approved {
-        if request.payload.live_tests {
+        if request.payload.live_tests && device.approved_capabilities.live_tests {
             modes.push("pentest_agent");
         }
-        if request.payload.website_reviews {
+        if request.payload.website_reviews && device.approved_capabilities.website_reviews {
             modes.push("website_agent");
         }
-        if request.payload.source_reviews {
+        if request.payload.source_reviews && device.approved_capabilities.source_reviews {
             modes.push("source_agent");
         }
     }
@@ -623,6 +663,13 @@ pub async fn poll(
     if (seq as i64) < device.work_sequence {
         return Err(ApiError::conflict("stale_work_poll"));
     }
+    let allowed_tools: Vec<_> = request
+        .payload
+        .live_tools
+        .iter()
+        .filter(|tool| device.approved_capabilities.live_tools.contains(tool))
+        .copied()
+        .collect();
     let mut assignment = None;
     if !device.paused
         && device
@@ -633,12 +680,10 @@ pub async fn poll(
             .bind(id).fetch_optional(&mut *tx).await?;
         if let Some(existing) = existing {
             if modes.contains(&existing.mode.as_str())
-                && existing.pentest_context.as_ref().is_none_or(|c| {
-                    c.scope
-                        .tools
-                        .iter()
-                        .all(|t| request.payload.live_tools.contains(t))
-                })
+                && existing
+                    .pentest_context
+                    .as_ref()
+                    .is_none_or(|c| c.scope.tools.iter().all(|t| allowed_tools.contains(t)))
             {
                 assignment = Some(existing.assignment()?);
             }
@@ -650,14 +695,14 @@ pub async fn poll(
                 .bind(&device.introduction.compute_group).bind(device.operator_id).fetch_one(&mut *tx).await?;
             if active < i64::from(state.compute_group_concurrency) {
                 let next_live = if modes.contains(&"pentest_agent") {
-                    next_live_step(&mut tx, id, &device, &request.payload.live_tools).await?
+                    next_live_step(&mut tx, id, &device, &allowed_tools).await?
                 } else {
                     None
                 };
                 // Roles within a review stay sequential and use distinct devices.
                 // Spare host slots can serve other reviews without changing identity.
                 let step: Option<(Uuid, Uuid, String, i32)> = sqlx::query_as("SELECT s.id, s.review_id, r.mode, r.agent_attempt_seconds FROM review_steps s JOIN reviews r ON r.id = s.review_id WHERE s.state = 'queued' AND r.state IN ('queued','running') AND r.mode = ANY($2) AND (r.mode <> 'pentest_agent' OR s.id=$4) AND (r.mode <> 'pentest_agent' OR $3::jsonb @> COALESCE(r.pentest_context->'scope'->'tools', '[]'::jsonb)) AND (s.assigned_device_id IS NULL OR s.assigned_device_id = $1) AND r.deadline_at > now() AND NOT EXISTS (SELECT 1 FROM review_steps previous WHERE previous.review_id = r.id AND previous.position < s.position AND previous.state <> 'completed') AND NOT EXISTS (SELECT 1 FROM review_steps used JOIN work_leases l ON l.id = used.current_lease_id WHERE used.review_id = r.id AND used.state = 'completed' AND l.device_id = $1) ORDER BY r.created_at, s.position LIMIT 1 FOR UPDATE OF s")
-                    .bind(id).bind(&modes).bind(DbJson(&request.payload.live_tools)).bind(next_live).fetch_optional(&mut *tx).await?;
+                    .bind(id).bind(&modes).bind(DbJson(&allowed_tools)).bind(next_live).fetch_optional(&mut *tx).await?;
                 if let Some((step_id, review_id, mode, attempt_seconds)) = step {
                     let lease = Uuid::new_v4();
                     let seconds = if mode != "owned_fixture" {
@@ -754,20 +799,22 @@ pub async fn renew(
     }
     if current.mode == "pentest_agent" {
         let context = pentests::context(&mut tx, current.review_id).await?;
-        if !context
-            .scope
-            .tools
-            .iter()
-            .all(|tool| device.live_tools.contains(tool))
-        {
+        if !context.scope.tools.iter().all(|tool| {
+            device.live_tools.contains(tool)
+                && device.approved_capabilities.live_tools.contains(tool)
+        }) {
             return Err(ApiError::conflict("selected_tool_unavailable"));
         }
     }
-    if (current.mode == "pentest_agent" && (!device.private_work_approved || !device.live_tests))
+    if (current.mode == "pentest_agent"
+        && (!device.private_work_approved
+            || (!device.live_tests || !device.approved_capabilities.live_tests)))
         || (current.mode == "website_agent"
-            && (!device.private_work_approved || !device.website_reviews))
+            && (!device.private_work_approved
+                || (!device.website_reviews || !device.approved_capabilities.website_reviews)))
         || (current.mode == "source_agent"
-            && (!device.private_work_approved || !device.source_reviews))
+            && (!device.private_work_approved
+                || (!device.source_reviews || !device.approved_capabilities.source_reviews)))
     {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
@@ -902,7 +949,7 @@ async fn complete_request(
     }
     let (matches, evidence_complete) = if let WorkResult::Website(result) = &input.result {
         if !device.private_work_approved
-            || !device.website_reviews
+            || (!device.website_reviews || !device.approved_capabilities.website_reviews)
             || !result.valid()
             || device.introduction.declared_model.as_deref()
                 != Some(&result.execution.declared_model)
@@ -917,7 +964,7 @@ async fn complete_request(
         (None, Some(result.evidence_complete(&snapshot)))
     } else if let WorkResult::Source(result) = &input.result {
         if !device.private_work_approved
-            || !device.source_reviews
+            || (!device.source_reviews || !device.approved_capabilities.source_reviews)
             || !result.valid()
             || device.introduction.declared_model.as_deref()
                 != Some(&result.execution.declared_model)
@@ -943,12 +990,11 @@ async fn complete_request(
             }
         }
         if !device.private_work_approved
-            || !device.live_tests
-            || !context
-                .scope
-                .tools
-                .iter()
-                .all(|tool| device.live_tools.contains(tool))
+            || (!device.live_tests || !device.approved_capabilities.live_tests)
+            || !context.scope.tools.iter().all(|tool| {
+                device.live_tools.contains(tool)
+                    && device.approved_capabilities.live_tools.contains(tool)
+            })
             || !context.reviewers.iter().any(|saved| {
                 saved.device_id == id
                     && saved.operator_id == device.operator_id

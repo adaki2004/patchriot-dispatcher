@@ -116,7 +116,7 @@ pub(super) async fn eligible_with_route(
     // for this task, separately from staff approval and requester consent.
     // Presence-only restarts must not retain work availability forever. Busy
     // agents renew a live lease instead of polling while they execute a task.
-    let rows = sqlx::query_as::<_, Candidate>("SELECT d.id, d.operator_id, o.display_name AS operator_name, d.introduction, d.system_info, COALESCE(q.pending,0) AS pending_roles, EXISTS (SELECT 1 FROM work_leases busy WHERE busy.device_id = d.id AND busy.state = 'active' AND busy.expires_at > now() AND busy.deadline_at > now()) AS busy FROM devices d JOIN operators o ON o.id = d.operator_id LEFT JOIN (SELECT s.assigned_device_id, count(*) AS pending FROM review_steps s JOIN reviews r ON r.id = s.review_id WHERE r.state IN ('awaiting_payment','queued','running') AND s.state IN ('queued','leased') GROUP BY s.assigned_device_id) q ON q.assigned_device_id = d.id WHERE d.approval = 'approved' AND d.private_work_approved AND (CASE $2 WHEN 'source_agent' THEN d.source_reviews WHEN 'pentest_agent' THEN d.live_tests ELSE d.website_reviews END) AND NOT d.paused AND d.last_seen_at > now() - interval '30 seconds' AND (d.work_polled_at > now() - interval '30 seconds' OR EXISTS (SELECT 1 FROM work_leases l WHERE l.device_id = d.id AND l.state = 'active' AND l.expires_at > now() AND l.deadline_at > now())) AND d.introduction->>'runtime' = 'hermes' AND ($2 <> 'pentest_agent' OR d.introduction->>'declared_model' = ANY($4)) AND d.live_tools @> $3::jsonb AND ($1::uuid[] IS NULL OR d.id = ANY($1)) AND ($5::text IS NULL OR d.introduction->>'declared_model' = $5) ORDER BY d.created_at, d.id LIMIT 200 FOR UPDATE OF d")
+    let rows = sqlx::query_as::<_, Candidate>("SELECT d.id, d.operator_id, o.display_name AS operator_name, d.introduction, d.system_info, COALESCE(q.pending,0) AS pending_roles, EXISTS (SELECT 1 FROM work_leases busy WHERE busy.device_id = d.id AND busy.state = 'active' AND busy.expires_at > now() AND busy.deadline_at > now()) AS busy FROM devices d JOIN operators o ON o.id = d.operator_id LEFT JOIN (SELECT s.assigned_device_id, count(*) AS pending FROM review_steps s JOIN reviews r ON r.id = s.review_id WHERE r.state IN ('awaiting_payment','queued','running') AND s.state IN ('queued','leased') GROUP BY s.assigned_device_id) q ON q.assigned_device_id = d.id WHERE d.approval = 'approved' AND d.private_work_approved AND (d.approved_capabilities->>(CASE $2 WHEN 'source_agent' THEN 'source_reviews' WHEN 'pentest_agent' THEN 'live_tests' ELSE 'website_reviews' END))::boolean AND (d.approved_capabilities->'live_tools') @> $3::jsonb AND (CASE $2 WHEN 'source_agent' THEN d.source_reviews WHEN 'pentest_agent' THEN d.live_tests ELSE d.website_reviews END) AND NOT d.paused AND d.last_seen_at > now() - interval '30 seconds' AND (d.work_polled_at > now() - interval '30 seconds' OR EXISTS (SELECT 1 FROM work_leases l WHERE l.device_id = d.id AND l.state = 'active' AND l.expires_at > now() AND l.deadline_at > now())) AND d.introduction->>'runtime' = 'hermes' AND ($2 <> 'pentest_agent' OR d.introduction->>'declared_model' = ANY($4)) AND d.live_tools @> $3::jsonb AND ($1::uuid[] IS NULL OR d.id = ANY($1)) AND ($5::text IS NULL OR d.introduction->>'declared_model' = $5) ORDER BY d.created_at, d.id LIMIT 200 FOR UPDATE OF d")
         .bind(ids).bind(mode.as_str()).bind(DbJson(tools)).bind(&patchriot_protocol::pentests::LiveProvider::MODELS[..]).bind(primary.map(|p| p.model())).fetch_all(&mut **tx).await?;
     Ok(rows)
 }
@@ -377,7 +377,10 @@ pub(crate) async fn evidence(
     let device = worker(&mut tx, id, &request.public_key).await?;
     let current = lease(&mut tx, request.payload.lease_id).await?;
     active(&current, id, request.payload.lease_id)?;
-    if current.mode != "website_agent" || !device.private_work_approved || !device.website_reviews {
+    if current.mode != "website_agent"
+        || !device.private_work_approved
+        || (!device.website_reviews || !device.approved_capabilities.website_reviews)
+    {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "private_work_not_allowed",
@@ -406,6 +409,7 @@ pub(crate) async fn evidence(
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
+    consume_evidence_nonce(&mut tx, id, request.payload.nonce).await?;
     tx.commit().await?;
     Ok(Json(WebsiteWorkEvidence {
         snapshot,

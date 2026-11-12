@@ -1,5 +1,7 @@
 //! Advisory triage of the request, never a permission check or a target audit.
-//! Only explicitly consented scope/notes leave this service. Provider responses
+//! Only explicitly consented scope/testing context leave this service. Permission
+//! statements stay in the private request record and are not model instructions.
+//! Provider responses
 //! cannot choose tools, approve work, change its scope or spend customer funds.
 
 mod worker;
@@ -13,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 const MODEL: &str = "typesafe/jev-1.13";
-const POLICY: &str = "patchriot.request-screening.v1";
+const POLICY: &str = "patchriot.request-screening.v2";
 const ENDPOINT: &str = "https://openrouter.ai/api/alpha/decisions";
 const MAX_BYTES: usize = 32 * 1024;
 
@@ -39,8 +41,10 @@ fn questions() -> Value {
     })
 }
 
-fn input(scope: &WebsiteScope, note: &str) -> Value {
-    json!({"scope":scope,"permission_note":note})
+fn input(scope: &WebsiteScope) -> Value {
+    // Authority is checked separately. The requester's permission claim adds
+    // no useful evidence to model triage and must not enter its input.
+    json!({"scope":scope})
 }
 
 fn digest(value: &Value) -> String {
@@ -81,12 +85,8 @@ impl Jev {
         })
     }
 
-    async fn assess(
-        &self,
-        scope: &WebsiteScope,
-        note: &str,
-    ) -> Result<RequestScreening, &'static str> {
-        let state = input(scope, note);
+    async fn assess(&self, scope: &WebsiteScope) -> Result<RequestScreening, &'static str> {
+        let state = input(scope);
         let rubric = questions();
         self.assess_values(state, rubric).await
     }

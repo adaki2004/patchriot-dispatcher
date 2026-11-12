@@ -31,6 +31,7 @@ struct DeviceRow {
     introduction: DbJson<DeviceIntroduction>,
     approval: String,
     private_work_approved: bool,
+    approved_capabilities: DbJson<WorkCapabilities>,
     website_reviews: bool,
     live_tests: bool,
     live_tools: DbJson<Vec<pentests::LiveToolProfile>>,
@@ -83,6 +84,7 @@ impl DeviceRow {
             last_seen_at: self.last_seen_at.map(|t| t.timestamp()),
             sequence: self.sequence as u64,
             reports_received: None,
+            approved_capabilities: self.approved_capabilities.0.clone(),
         }
     }
 }
@@ -316,9 +318,18 @@ pub async fn agents(
                 state: row.state().into(),
                 last_seen_at: row.last_seen_at.map(|time| time.timestamp()),
                 system: row.system_info.as_ref().map(|s| s.0.clone()),
-                live_tests: row.private_work_approved && row.live_tests,
-                live_tools: if row.private_work_approved && row.live_tests {
-                    row.live_tools.0.clone()
+                live_tests: row.private_work_approved
+                    && row.live_tests
+                    && row.approved_capabilities.live_tests,
+                live_tools: if row.private_work_approved
+                    && row.live_tests
+                    && row.approved_capabilities.live_tests
+                {
+                    row.live_tools
+                        .iter()
+                        .filter(|t| row.approved_capabilities.live_tools.contains(t))
+                        .copied()
+                        .collect()
                 } else {
                     vec![]
                 },
@@ -342,14 +353,31 @@ pub async fn decision(
     {
         return Err(ApiError::bad("invalid_reason"));
     }
-    if !["approve", "revoke", "approve_private", "revoke_private"].contains(&input.action.as_str())
+    if ![
+        "approve",
+        "revoke",
+        "approve_private",
+        "revoke_private",
+        "set_capabilities",
+    ]
+    .contains(&input.action.as_str())
     {
         return Err(ApiError::bad("invalid_action"));
     }
-    if ["approve", "approve_private"].contains(&input.action.as_str()) && !caller.admin {
+    if ["approve", "approve_private", "set_capabilities"].contains(&input.action.as_str())
+        && !caller.admin
+    {
         return Err(ApiError::new(StatusCode::FORBIDDEN, "admin_required"));
     }
+    if input.capabilities.as_ref().is_some_and(|c| !c.valid())
+        || (input.capabilities.is_some()
+            && !["approve_private", "set_capabilities"].contains(&input.action.as_str()))
+        || (input.action == "set_capabilities" && input.capabilities.is_none())
+    {
+        return Err(ApiError::bad("invalid_capability_approval"));
+    }
     let mut tx = state.pool.begin().await?;
+    crate::reviews::scheduler(&mut tx).await?;
     let row = sqlx::query_as::<_, DeviceRow>("SELECT d.*, o.display_name AS operator_name FROM devices d JOIN operators o ON o.id = d.operator_id WHERE d.id = $1 AND ($2 OR d.operator_id = $3) FOR UPDATE OF d")
     .bind(id)
     .bind(caller.admin)
@@ -357,6 +385,31 @@ pub async fn decision(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(ApiError::missing)?;
+    if let Some(capabilities) = &input.capabilities {
+        if row.approval != "approved"
+            || row.introduction.runtime != RuntimeKind::Hermes
+            || (input.action == "set_capabilities" && !row.private_work_approved)
+        {
+            return Err(ApiError::conflict("approved_agent_required"));
+        }
+        if input.reason.as_deref().is_none_or(|r| r.trim().len() < 12) {
+            return Err(ApiError::bad("private_approval_reason_required"));
+        }
+        sqlx::query("UPDATE devices SET approved_capabilities=$2,updated_at=now() WHERE id=$1")
+            .bind(id)
+            .bind(DbJson(capabilities))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO device_events(device_id,actor_id,action,reason,capabilities) VALUES($1,$2,'capabilities_approved',$3,$4)")
+            .bind(id).bind(caller.id).bind(&input.reason).bind(DbJson(capabilities)).execute(&mut *tx).await?;
+        if input.action == "set_capabilities" {
+            tx.commit().await?;
+            crate::reviews::expire(&state.pool).await?;
+            let updated = sqlx::query_as::<_, DeviceRow>("SELECT d.*,o.display_name AS operator_name FROM devices d JOIN operators o ON o.id=d.operator_id WHERE d.id=$1")
+                .bind(id).fetch_one(&state.pool).await?;
+            return Ok(Json(updated.view()));
+        }
+    }
     if ["approve_private", "revoke_private"].contains(&input.action.as_str()) {
         let approved = input.action == "approve_private";
         if approved
@@ -376,7 +429,7 @@ pub async fn decision(
         }
         if row.private_work_approved != approved {
             sqlx::query(
-                "UPDATE devices SET private_work_approved = $2, updated_at = now() WHERE id = $1",
+                "UPDATE devices SET private_work_approved = $2, approved_capabilities=CASE WHEN $2 THEN approved_capabilities ELSE '{\"website_reviews\":false,\"source_reviews\":false,\"live_tests\":false,\"live_tools\":[]}'::jsonb END, updated_at = now() WHERE id = $1",
             )
             .bind(id)
             .bind(approved)

@@ -38,6 +38,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok()
                 .as_deref(),
         )?
+        .with_balanced_inference(
+            std::env::var("PATCHRIOT_INFERENCE_BALANCED_POOLS").as_deref() == Ok("true"),
+        )?
         .with_agent_attempt_seconds(seconds)?
         .with_live_requests_per_day(
             std::env::var("PATCHRIOT_LIVE_REQUESTS_PER_DAY")

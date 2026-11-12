@@ -12,11 +12,26 @@ pub(super) struct Candidate {
     operator_id: Uuid,
     operator_name: String,
     introduction: DbJson<DeviceIntroduction>,
+    system_info: Option<DbJson<AgentSystem>>,
     pending_roles: i64,
     busy: bool,
 }
 
 impl Candidate {
+    pub(super) fn reported_secondary(&self) -> Option<patchriot_protocol::pentests::LiveProvider> {
+        use patchriot_protocol::pentests::LiveProvider;
+        let primary = self
+            .introduction
+            .declared_model
+            .as_deref()
+            .and_then(LiveProvider::from_model)?;
+        self.system_info
+            .as_ref()?
+            .secondary_model
+            .as_deref()
+            .and_then(LiveProvider::from_model)
+            .filter(|backup| primary.permits_secondary(*backup))
+    }
     pub(super) fn disclosure(self) -> WebsiteReviewer {
         WebsiteReviewer {
             device_id: self.id,
@@ -26,6 +41,48 @@ impl Candidate {
             declared_model: self.introduction.declared_model.clone().unwrap_or_default(),
             compute_group: self.introduction.compute_group.clone(),
         }
+    }
+}
+
+/// Prefer the pool with less outstanding work per eligible device. Equal
+/// loads use the request ID, so refreshing a quiet checkout does not flip it.
+/// A pool needs two agents and matching backup declarations; no provider is
+/// invented from the other pool's availability.
+pub(super) fn balanced_pool(
+    mut candidates: Vec<Candidate>,
+    request: Uuid,
+) -> (
+    Vec<Candidate>,
+    Option<patchriot_protocol::pentests::LiveProvider>,
+) {
+    use patchriot_protocol::pentests::LiveProvider::{NearDeepSeek, VeniceDeepSeek};
+    candidates.retain(|c| c.reported_secondary().is_some());
+    let (near, venice): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .partition(|c| c.introduction.declared_model.as_deref() == Some(NearDeepSeek.model()));
+    let near_ready = near.len() >= 2;
+    let venice_ready = venice.len() >= 2;
+    let load = |pool: &[Candidate]| {
+        pool.iter()
+            .map(|c| c.pending_roles.max(0) as u64 + u64::from(c.busy))
+            .sum::<u64>()
+    };
+    let choose_near = match (near_ready, venice_ready) {
+        (false, false) => return (vec![], None),
+        (true, false) => true,
+        (false, true) => false,
+        (true, true) => {
+            match (load(&near) * venice.len() as u64).cmp(&(load(&venice) * near.len() as u64)) {
+                std::cmp::Ordering::Less => true,
+                std::cmp::Ordering::Greater => false,
+                std::cmp::Ordering::Equal => request.as_bytes()[15].is_multiple_of(2),
+            }
+        }
+    };
+    if choose_near {
+        (near, Some(VeniceDeepSeek))
+    } else {
+        (venice, Some(NearDeepSeek))
     }
 }
 
@@ -59,7 +116,7 @@ pub(super) async fn eligible_with_route(
     // for this task, separately from staff approval and requester consent.
     // Presence-only restarts must not retain work availability forever. Busy
     // agents renew a live lease instead of polling while they execute a task.
-    let rows = sqlx::query_as::<_, Candidate>("SELECT d.id, d.operator_id, o.display_name AS operator_name, d.introduction, COALESCE(q.pending,0) AS pending_roles, EXISTS (SELECT 1 FROM work_leases busy WHERE busy.device_id = d.id AND busy.state = 'active' AND busy.expires_at > now() AND busy.deadline_at > now()) AS busy FROM devices d JOIN operators o ON o.id = d.operator_id LEFT JOIN (SELECT s.assigned_device_id, count(*) AS pending FROM review_steps s JOIN reviews r ON r.id = s.review_id WHERE r.state IN ('awaiting_payment','queued','running') AND s.state IN ('queued','leased') GROUP BY s.assigned_device_id) q ON q.assigned_device_id = d.id WHERE d.approval = 'approved' AND d.private_work_approved AND (CASE $2 WHEN 'source_agent' THEN d.source_reviews WHEN 'pentest_agent' THEN d.live_tests ELSE d.website_reviews END) AND NOT d.paused AND d.last_seen_at > now() - interval '30 seconds' AND (d.work_polled_at > now() - interval '30 seconds' OR EXISTS (SELECT 1 FROM work_leases l WHERE l.device_id = d.id AND l.state = 'active' AND l.expires_at > now() AND l.deadline_at > now())) AND d.introduction->>'runtime' = 'hermes' AND ($2 <> 'pentest_agent' OR d.introduction->>'declared_model' = ANY($4)) AND d.live_tools @> $3::jsonb AND ($1::uuid[] IS NULL OR d.id = ANY($1)) AND ($5::text IS NULL OR d.introduction->>'declared_model' = $5) ORDER BY d.created_at, d.id LIMIT 200 FOR UPDATE OF d")
+    let rows = sqlx::query_as::<_, Candidate>("SELECT d.id, d.operator_id, o.display_name AS operator_name, d.introduction, d.system_info, COALESCE(q.pending,0) AS pending_roles, EXISTS (SELECT 1 FROM work_leases busy WHERE busy.device_id = d.id AND busy.state = 'active' AND busy.expires_at > now() AND busy.deadline_at > now()) AS busy FROM devices d JOIN operators o ON o.id = d.operator_id LEFT JOIN (SELECT s.assigned_device_id, count(*) AS pending FROM review_steps s JOIN reviews r ON r.id = s.review_id WHERE r.state IN ('awaiting_payment','queued','running') AND s.state IN ('queued','leased') GROUP BY s.assigned_device_id) q ON q.assigned_device_id = d.id WHERE d.approval = 'approved' AND d.private_work_approved AND (CASE $2 WHEN 'source_agent' THEN d.source_reviews WHEN 'pentest_agent' THEN d.live_tests ELSE d.website_reviews END) AND NOT d.paused AND d.last_seen_at > now() - interval '30 seconds' AND (d.work_polled_at > now() - interval '30 seconds' OR EXISTS (SELECT 1 FROM work_leases l WHERE l.device_id = d.id AND l.state = 'active' AND l.expires_at > now() AND l.deadline_at > now())) AND d.introduction->>'runtime' = 'hermes' AND ($2 <> 'pentest_agent' OR d.introduction->>'declared_model' = ANY($4)) AND d.live_tools @> $3::jsonb AND ($1::uuid[] IS NULL OR d.id = ANY($1)) AND ($5::text IS NULL OR d.introduction->>'declared_model' = $5) ORDER BY d.created_at, d.id LIMIT 200 FOR UPDATE OF d")
         .bind(ids).bind(mode.as_str()).bind(DbJson(tools)).bind(&patchriot_protocol::pentests::LiveProvider::MODELS[..]).bind(primary.map(|p| p.model())).fetch_all(&mut **tx).await?;
     Ok(rows)
 }
@@ -360,6 +417,49 @@ pub(crate) async fn evidence(
 mod selection_tests {
     use super::*;
 
+    #[test]
+    fn balanced_pools_use_ready_reciprocal_routes_and_account_for_load() {
+        use patchriot_protocol::pentests::LiveProvider::{NearDeepSeek, VeniceDeepSeek};
+        let make = |id, primary: patchriot_protocol::pentests::LiveProvider, backup: &str, load| {
+            let mut item = candidate(id, id, "fixture", primary.model(), load);
+            item.system_info = Some(DbJson(AgentSystem {
+                os_name: "Linux".into(),
+                os_version: None,
+                architecture: "x86_64".into(),
+                relay_version: "fixture".into(),
+                secondary_model: Some(backup.into()),
+            }));
+            item
+        };
+        let pool = |near_load, venice_load| {
+            vec![
+                make(1, NearDeepSeek, VeniceDeepSeek.model(), near_load),
+                make(2, NearDeepSeek, VeniceDeepSeek.model(), near_load),
+                make(3, VeniceDeepSeek, NearDeepSeek.model(), venice_load),
+                make(4, VeniceDeepSeek, NearDeepSeek.model(), venice_load),
+            ]
+        };
+        for (id, expected) in [(0, VeniceDeepSeek), (1, NearDeepSeek)] {
+            let (chosen, backup) = balanced_pool(pool(0, 0), Uuid::from_u128(id));
+            assert_eq!(chosen.len(), 2);
+            assert_eq!(backup, Some(expected));
+            assert!(chosen.iter().all(|c| c.reported_secondary() == backup));
+        }
+        assert_eq!(balanced_pool(pool(4, 0), Uuid::nil()).1, Some(NearDeepSeek));
+        assert_eq!(
+            balanced_pool(pool(0, 4), Uuid::from_u128(1)).1,
+            Some(VeniceDeepSeek)
+        );
+        let mut missing = pool(0, 0);
+        missing[0].system_info = None;
+        assert_eq!(balanced_pool(missing, Uuid::nil()).1, Some(NearDeepSeek));
+        let mut invalid = pool(0, 0);
+        invalid[0].system_info.as_mut().unwrap().secondary_model =
+            Some(NearDeepSeek.model().into());
+        invalid[2].system_info = None;
+        assert!(balanced_pool(invalid, Uuid::nil()).0.is_empty());
+    }
+
     fn candidate(id: u128, operator: u128, machine: &str, model: &str, pending: i64) -> Candidate {
         Candidate {
             id: Uuid::from_u128(id),
@@ -376,6 +476,7 @@ mod selection_tests {
             }),
             pending_roles: pending,
             busy: false,
+            system_info: None,
         }
     }
 

@@ -41,6 +41,7 @@ pub struct AppState {
     venice_fallback_enabled: bool,
     inference_primary: Option<patchriot_protocol::pentests::LiveProvider>,
     inference_secondary: Option<patchriot_protocol::pentests::LiveProvider>,
+    inference_balanced_pools: bool,
 }
 
 impl AppState {
@@ -77,6 +78,7 @@ impl AppState {
             venice_fallback_enabled: false,
             inference_primary: None,
             inference_secondary: None,
+            inference_balanced_pools: false,
         })
     }
 
@@ -140,7 +142,7 @@ impl AppState {
             |value: &str| LiveProvider::from_model(value).ok_or("unsupported inference model");
         let primary = primary.map(parse).transpose()?;
         let secondary = secondary.map(parse).transpose()?;
-        if (primary.is_some() && self.venice_fallback_enabled)
+        if (primary.is_some() && (self.venice_fallback_enabled || self.inference_balanced_pools))
             || secondary.is_some_and(|s| primary.is_none_or(|p| !p.permits_secondary(s)))
         {
             return Err(
@@ -149,6 +151,20 @@ impl AppState {
         }
         self.inference_primary = primary;
         self.inference_secondary = secondary;
+        Ok(self)
+    }
+
+    /// Select one ready provider pool per new assessment. The chosen team and
+    /// optional reciprocal backup are still bound by requester consent.
+    pub fn with_balanced_inference(mut self, enabled: bool) -> Result<Self, &'static str> {
+        if enabled
+            && (self.inference_primary.is_some()
+                || self.inference_secondary.is_some()
+                || self.venice_fallback_enabled)
+        {
+            return Err("balanced inference cannot be combined with a fixed or legacy route");
+        }
+        self.inference_balanced_pools = enabled;
         Ok(self)
     }
 

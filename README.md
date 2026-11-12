@@ -37,6 +37,14 @@ Optional two-account scopes bind the testing/reference distinction and password-
 
 Shared protocol validation accepts the additional scoped scanner receipts and verifies evidence-indexed coverage records. Deploy compatible core and dispatcher readers before adapter 21 runners. Existing receipts remain readable. Tool observations and deferred coverage are retained separately from validated findings.
 
+## Checked capabilities
+
+Pairing and private-data approval are separate from readiness for particular tools. Under **Agent approvals → Review capabilities**, staff record the work modes and tools they actually checked, with a reason. Scheduling uses the intersection of that list and the device’s current opt-ins. A poll cannot grant itself additional capabilities. Revoking a required capability stops unfinished work and its evidence access; re-approval does not restart a paid attempt. Public contributor earnings remain a separate feature.
+
+**Upgrade together:** migration `0036_audit_boundaries.sql` gives existing devices an empty approved list, and evidence downloads now require a fresh signed nonce. Drain work first; update core, dispatcher, gateway and relay together; then staff approve each managed runtime’s tested capabilities before resuming work. Older relays cannot download evidence under this protocol. Download retries use a new nonce while mutation retries retain their original sequence fences. A replayed evidence request is rejected, and recent read nonces are bounded per device.
+
+The internal service key remains an administrator-level credential. Keep the internal listener on a private network and exclude that key from the agent gateway. Credential-vault rotation currently requires draining work, removing saved test credentials through their normal lifecycle, then replacing the key on dispatcher and gateway together. Do not overwrite a key while encrypted credentials still depend on it.
+
 ## Operating reference
 
 > **DON’T TRUST! VERIFY!** Review the implementation and test its permission checks before using your own deployment. Model confidence and signed reports do not prove a finding.
@@ -50,7 +58,7 @@ A saved live-test scope gets a fresh DNS TXT challenge for each exact domain. Th
 
 Every domain must verify before the request automatically becomes eligible for checkout. Verification creates no work and spends no money; only the requester can select the team and pay or redeem a coupon. Staff can still reject or revoke a scope. Migration 17 advances existing, unexpired, fully verified pending requests; blocked and incomplete requests remain unchanged. Migration 22 gives new requests up to seven days for DNS setup, with no lookup until the requester clicks Check DNS. Successful verification narrows the saved expiry to at most 24 hours. Older deadlines are not extended; repeated checks cannot extend a verified permission. Scheduling, evidence access and renewal recheck the saved permission; expiry or revocation stops unfinished work. Proof never permits another account, another origin or arbitrary tools; consent still binds the current scope hash. Migration 13 also gives still-active older scopes fresh challenges; they do not bypass this gate.
 
-The verifier uses the host’s DNS resolver. Permit DNS egress and configure a trusted resolver for the deployment. It looks up the exact `_patchriot.<domain>.` TXT name, combines chunks within one record, and requires an exact token match. Missing records, DNS failures and late replies never grant access. DNS control does not prove legal authority over everything reachable through a domain; staff still review scope and authorization.
+The verifier uses authenticated DNS-over-HTTPS to Cloudflare and Google and validates DNSSEC. Permit IPv4 HTTPS egress to those resolvers; the resolver transport uses their fixed IPv4 addresses with TLS hostname verification so unavailable IPv6 cannot consume the lookup window. Correctly unsigned zones remain supported; a broken signature chain is an error, not a missing token. There is no plaintext DNS fallback. It looks up the exact `_patchriot.<domain>.` TXT name, combines chunks within one record, and requires an exact token match. Missing records, DNS failures and late replies never grant access. DNS control does not prove legal authority over everything reachable through a domain; the requester must still have permission to test it. A random, request-bound token published through a wildcard TXT also proves control of that zone; it never grants additional target origins.
 
 </details>
 
@@ -82,6 +90,8 @@ Removing this configuration stops new grants through the legacy endpoint. Revoke
 These instructions start a separate local installation. To request a website assessment, use the hosted beta at [patchriot.net](https://patchriot.net).
 
 Keep `patchriot-core` beside this repository for the Apache-2.0 protocol crate. Use **Rust 1.94.1** and a dedicated **PostgreSQL 17** database.
+
+Copy [.env.example](.env.example) to a private `.env` (mode `600`) and fill the required values. Use a database separate from core and the same generated internal service secret. Load the file before starting: `set -a; . ./.env; set +a`. The binary does not load it automatically. For grey-box work, generate a separate credential-encryption key with `openssl rand -hex 32`; share it only with this dispatcher’s agent gateway.
 
 | Private environment variable | Purpose |
 | --- | --- |
@@ -421,6 +431,10 @@ Live candidates may declare `abliterated-model-large-v2` (Abliteration) or `abli
 New live plans offer `investigate_validate_v1`: two named devices, full investigation followed by targeted validation, with no third role. Migration 31 permits explicit allowances up to three hours per role; saved reservations remain unchanged. Older `investigate_verify_v1` requests keep two required roles plus a third for serious findings, disagreement, unchecked claims or incomplete evidence. All three devices are named and checked at consent/funding; only the first two jobs are created initially. After their reports arrive, one completion transaction records the decision and, if necessary, queues the reserved third device. Results and reasons remain private. Cancellation, permission expiry and revocation still stop work. An incomplete earlier stage is never hidden by a later result.
 
 Missing `review_policy` keeps the original three-role behavior, including existing paid orders. Snapshot and source reviews reject the live-only policy. Upgrade dispatcher and gateway before the new core checkout. The shared protocol defines the policy; there is no model vote that can change permissions, pricing or the selected team.
+
+### Permission notes and testing context
+
+`authority_note` is a requester-supplied permission claim stored for private staff review. It is not sent to the advisory model or live investigating agents, and it cannot approve work. Extra testing context is a separate field: it is screened, remains untrusted in agent prompts and cannot expand the saved origins, methods, accounts or allowances. The relay enforces these limits independently of model output. Screening is an additional check, not proof that prompt injection is impossible.
 
 ### Primary provider and backup
 

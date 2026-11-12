@@ -9,7 +9,6 @@ use uuid::Uuid;
 pub(super) struct Claim {
     pub id: Uuid,
     pub scope: DbJson<WebsiteScope>,
-    pub authority_note: String,
     pub screening_claim: Uuid,
 }
 
@@ -24,7 +23,7 @@ pub(super) async fn claim(pool: &PgPool) -> Result<Option<Claim>, sqlx::Error> {
         .execute(&mut *tx).await?;
     sqlx::query("UPDATE site_checks SET screening_state = CASE WHEN screening_attempts < 2 THEN 'queued' ELSE 'unavailable' END, screening_claim = NULL, screening_until = NULL WHERE screening_state = 'running' AND screening_until <= now()")
         .execute(&mut *tx).await?;
-    let result = sqlx::query_as::<_, Claim>("UPDATE site_checks SET screening_state = 'running', screening_claim = $1, screening_until = now() + interval '45 seconds', screening_attempts = screening_attempts + 1 WHERE id = (SELECT id FROM site_checks WHERE screening_state = 'queued' AND state = 'pending_approval' AND deadline_at > now() AND NOT EXISTS (SELECT 1 FROM site_checks WHERE screening_state = 'running') ORDER BY created_at LIMIT 1 FOR UPDATE) RETURNING id, scope, authority_note, screening_claim")
+    let result = sqlx::query_as::<_, Claim>("UPDATE site_checks SET screening_state = 'running', screening_claim = $1, screening_until = now() + interval '45 seconds', screening_attempts = screening_attempts + 1 WHERE id = (SELECT id FROM site_checks WHERE screening_state = 'queued' AND state = 'pending_approval' AND deadline_at > now() AND NOT EXISTS (SELECT 1 FROM site_checks WHERE screening_state = 'running') ORDER BY created_at LIMIT 1 FOR UPDATE) RETURNING id, scope, screening_claim")
         .bind(Uuid::new_v4()).fetch_optional(&mut *tx).await?;
     tx.commit().await?;
     Ok(result)
@@ -49,7 +48,7 @@ pub(super) async fn finish(
 async fn tick(pool: &PgPool, jev: Option<&Jev>) -> Result<(), sqlx::Error> {
     if let Some(claim) = claim(pool).await? {
         let result = match jev {
-            Some(jev) => jev.assess(&claim.scope, &claim.authority_note).await,
+            Some(jev) => jev.assess(&claim.scope).await,
             None => Err("screening_not_configured"),
         };
         if let Err(code) = &result {

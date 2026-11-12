@@ -94,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         stopped.clone(),
     ));
     let collector = tokio::spawn(websites::run_worker(pool.clone(), stopped.clone()));
-    let resolver = hickory_resolver::TokioResolver::builder_tokio()?.build()?;
+    let resolver = ownership::resolver()?;
     let ownership = tokio::spawn(ownership::run_worker(pool, resolver, stopped.clone()));
     eprintln!("Patchriot dispatcher listening on {bind}");
     let stopping = stop.clone();

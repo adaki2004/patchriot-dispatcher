@@ -120,7 +120,7 @@ async fn poll(
 }
 
 async fn approve_private(app: &TestApp, id: Uuid) {
-    let response = app.request("POST", &format!("/internal/devices/{id}/decision"), json!({"action":"approve_private", "reason":"Reviewed the fixture operator and isolated runtime."}), Some((app.admin, true))).await;
+    let response = app.request("POST", &format!("/internal/devices/{id}/decision"), json!({"action":"approve_private","capabilities":TestApp::checked_capabilities(), "reason":"Reviewed the fixture operator and isolated runtime."}), Some((app.admin, true))).await;
     assert_eq!(response.0, StatusCode::OK, "{}", response.1);
     assert_eq!(response.1["private_work_approved"], true);
 }
@@ -181,7 +181,10 @@ async fn evidence(app: &TestApp, key: &DeviceKey, id: Uuid, lease_id: Uuid) -> (
     app.signed(
         key,
         &format!("/v1/devices/{id}/work/evidence"),
-        ReadWorkEvidence { lease_id },
+        ReadWorkEvidence {
+            nonce: Uuid::new_v4(),
+            lease_id,
+        },
     )
     .await
 }
@@ -385,7 +388,7 @@ async fn private_approval_is_separate_and_revocation_stops_access_and_renewal() 
         app.request(
             "POST",
             &path,
-            json!({"action":"approve_private","reason":"Owner cannot self-approve."}),
+            json!({"action":"approve_private","capabilities":TestApp::checked_capabilities(),"reason":"Owner cannot self-approve."}),
             Some((app.owner, false))
         )
         .await

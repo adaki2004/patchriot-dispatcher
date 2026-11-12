@@ -65,7 +65,7 @@ async fn crew(app: &TestApp) -> Vec<(DeviceKey, Uuid)> {
             app.request(
                 "POST",
                 &format!("/internal/devices/{id}/decision"),
-                json!({"action":"approve_private","reason":"Reviewed this synthetic operator."}),
+                json!({"action":"approve_private","capabilities":TestApp::checked_capabilities(),"reason":"Reviewed this synthetic operator."}),
                 Some((app.admin, true))
             )
             .await
@@ -300,7 +300,14 @@ async fn source_jobs_need_separate_opt_in_and_exact_consent_then_deliver_three_r
         assert!(work["assignment"]["website"].is_null());
         let evidence_path = format!("/v1/devices/{device}/work/source-evidence");
         let evidence = app
-            .signed(key, &evidence_path, ReadWorkEvidence { lease_id: lease })
+            .signed(
+                key,
+                &evidence_path,
+                ReadWorkEvidence {
+                    nonce: Uuid::new_v4(),
+                    lease_id: lease,
+                },
+            )
             .await;
         assert_eq!(evidence.0, StatusCode::OK, "{}", evidence.1);
         assert_eq!(
@@ -311,7 +318,10 @@ async fn source_jobs_need_separate_opt_in_and_exact_consent_then_deliver_three_r
             .signed(
                 &devices[(index + 1) % 3].0,
                 &evidence_path,
-                ReadWorkEvidence { lease_id: lease },
+                ReadWorkEvidence {
+                    nonce: Uuid::new_v4(),
+                    lease_id: lease,
+                },
             )
             .await;
         assert_eq!(wrong.0, StatusCode::UNAUTHORIZED);
@@ -319,7 +329,10 @@ async fn source_jobs_need_separate_opt_in_and_exact_consent_then_deliver_three_r
             app.signed(
                 key,
                 &format!("/v1/devices/{device}/work/evidence"),
-                ReadWorkEvidence { lease_id: lease }
+                ReadWorkEvidence {
+                    nonce: Uuid::new_v4(),
+                    lease_id: lease
+                }
             )
             .await
             .0,
@@ -465,7 +478,10 @@ async fn active_source_work_loses_reads_renewal_and_completion_on_delete_expiry_
             app.signed(
                 key,
                 &format!("/v1/devices/{device}/work/source-evidence"),
-                ReadWorkEvidence { lease_id: lease }
+                ReadWorkEvidence {
+                    nonce: Uuid::new_v4(),
+                    lease_id: lease
+                }
             )
             .await
             .0,

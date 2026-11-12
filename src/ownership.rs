@@ -19,6 +19,31 @@ use uuid::Uuid;
 
 const PREFIX: &str = "patchriot-domain-verification=";
 
+/// Ownership proofs use authenticated DNS transport plus local DNSSEC
+/// validation. Unsigned zones remain valid; bogus signed answers fail closed.
+/// No UDP fallback, local hosts overrides or search-domain expansion.
+pub fn resolver() -> Result<TokioResolver, hickory_resolver::net::NetError> {
+    use hickory_resolver::{
+        config::{CLOUDFLARE, GOOGLE, ResolverConfig},
+        net::runtime::TokioRuntimeProvider,
+    };
+    let mut config = ResolverConfig::https(&CLOUDFLARE);
+    config
+        .name_servers
+        .extend(ResolverConfig::https(&GOOGLE).name_servers);
+    // Query either provider over IPv4. An unreachable IPv6 route can consume
+    // the whole ownership deadline before the resolver tries an IPv4 server.
+    // This transport choice still resolves both IPv4 and IPv6 target records.
+    config.name_servers.retain(|server| server.ip.is_ipv4());
+    let mut builder = TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
+    builder.options_mut().validate = true;
+    builder.options_mut().use_hosts_file = hickory_resolver::config::ResolveHosts::Never;
+    builder.options_mut().timeout = Duration::from_secs(3);
+    builder.options_mut().attempts = 1;
+    builder.options_mut().num_concurrent_reqs = 4;
+    builder.build()
+}
+
 #[derive(FromRow)]
 struct Permission {
     scope_sha256: String,

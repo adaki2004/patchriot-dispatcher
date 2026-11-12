@@ -212,7 +212,10 @@ pub(crate) async fn evidence(
     let device = worker(&mut tx, id, &request.public_key).await?;
     let current = lease(&mut tx, request.payload.lease_id).await?;
     active(&current, id, request.payload.lease_id)?;
-    if current.mode != "source_agent" || !device.private_work_approved || !device.source_reviews {
+    if current.mode != "source_agent"
+        || !device.private_work_approved
+        || (!device.source_reviews || !device.approved_capabilities.source_reviews)
+    {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "private_work_not_allowed",
@@ -241,6 +244,7 @@ pub(crate) async fn evidence(
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
+    consume_evidence_nonce(&mut tx, id, request.payload.nonce).await?;
     tx.commit().await?;
     Ok(Json(SourceWorkEvidence {
         bundle,

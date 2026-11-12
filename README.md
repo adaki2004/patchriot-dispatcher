@@ -25,7 +25,7 @@ flowchart LR
 - **Work:** approved devices, queue capacity, bounded assignments, cancellation and retries. The agents stay on managed Kali machines.
 - **Evidence:** private findings, tool records, disagreements and report deletion. Admin activity counts cover the full history, without loading report bodies.
 
-**Core** owns accounts, NEAR Intents checkout and accounting. **Relay** runs beside Hermes and enforces access to tools and model inference. The optional NEAR AI report check reviews consistency and returns a signed receipt; it does not certify a finding as true.
+**Core** owns accounts, NEAR Intents checkout and accounting. **Relay** runs beside Hermes and enforces access to tools and model inference.
 
 ## What customers see
 
@@ -95,7 +95,7 @@ Keep `patchriot-core` beside this repository for the Apache-2.0 protocol crate. 
 | `PATCHRIOT_RELAY_BIND` | Optional agent-only listener for Tailscale Serve, e.g. `127.0.0.1:7412`; requires both listeners on loopback |
 | `PATCHRIOT_AGENT_ATTEMPT_SECONDS` | Optional agent limit: `600` by default, at most `10800` |
 | `PATCHRIOT_JEV_OPENROUTER_KEY` | Optional server-only OpenRouter key for consented request screening |
-| `PATCHRIOT_NEAR_AI_KEY` | Optional server-only NEAR AI key for requester-approved report consistency checks |
+| `PATCHRIOT_NEAR_AI_KEY` | Legacy report-check worker only; leave unset for new deployments |
 
 ```sh
 cargo run --locked
@@ -139,15 +139,13 @@ Leaving `PATCHRIOT_RELAY_BIND` unset preserves the existing local/internal setup
 
 **Rust schedules the work.** There is no lead Hermes agent in the dispatcher. Code checks permissions, records the agreed team and assigns investigator, reproducer and challenger roles. Workers use Hermes through the relay’s isolated adapter: local models for offline modes, or the explicitly configured hosted provider for live HTTP tests.
 
-### Optional NEAR AI report check
+### Saved report-check receipts
 
-With `PATCHRIOT_NEAR_AI_KEY` configured, the requester can ask for one advisory check of a finished live-test report. `POST /internal/reviews/:id/consistency-check` requires `{"accepts_near_ai":true}` and the requester's identity; staff cannot consent for someone else. `GET` returns its status and receipt to the requester or authorized staff. Migration 25 stores one durable attempt per report. Concurrent clicks reuse that attempt; interrupted or unverifiable completions are never purchased again automatically.
+The optional summary checker is retired from the website. Core rejects new public check requests and keeps authenticated read access to existing receipts. Leave `PATCHRIOT_NEAR_AI_KEY` unset to disable the legacy worker; this does not affect the relay’s NEAR model route. Saved inputs and results remain subject to report retention. Migration 25 is retained so existing databases and receipts stay compatible.
 
-The checker sends bounded finding excerpts and request metadata to `Qwen/Qwen3.8-27B-abliterated`. Raw HTTP captures, query values and stored login credentials are excluded; excerpts can still contain sensitive details. Advice can flag possible duplicates or claims needing review. It cannot alter original findings, approve work, access a target or move funds. Existing deterministic grouping remains the report's source of counts.
+A saved signature authenticates the model’s response, not the truth of a finding or the Kali work. Scout and Recon remain responsible for investigation and reproduction.
 
-The pinned [NEAR AI Rust SDK](https://docs.near.ai/cloud/inference-sdk/rust) checks fresh gateway/model attestation, requires UpToDate TCB status and GPU evidence, then verifies a provider-TEE signature over the exact request and response bytes. Gateway-only signatures, changed bytes and malformed advice are rejected. The downloadable receipt includes those bytes, hashes, signature and observed measurements. It does not include a portable hardware certificate chain or an audited source allowlist, identify a physical serving machine, attest the Kali agents or establish that findings are true. This integration uses verified HTTPS, not end-to-end encryption. See [response signatures and their limits](https://docs.near.ai/cloud/verification/cloud-api/response-signatures).
-
-Checks run one at a time with a three-minute timeout and up to 8,192 output tokens, including the model's reasoning. Truncated answers remain unverified even when their visible JSON is valid. The provider key stays in dispatcher, never the agent gateway, browser or relay. The receipt follows the report's fixed 12-hour deletion clock, including queued inputs and late responses. Deploy migration 25 before the matching core UI; no relay update is required for this feature.
+### Recorded progress
 
 Adapter 16 can attach a versioned structured checklist to progress and final reports. Terminal public-stage outcomes require anonymous HTTP references and successful tool receipts; verified access cannot hide public gaps. Reused stages are checked against the saved earlier assignment's receipts and approved origins before admission. Missing/failed/truncated records cannot be promoted to completed reuse. Historical results without the optional field retain their format and legacy completeness policy. Deploy matching core, dispatcher/gateway, relay binary, then the rebuilt adapter 16 image; older readers reject the new field. These changes have local fixture coverage, not a new live benchmark.
 
@@ -430,7 +428,7 @@ For new requests, `PATCHRIOT_INFERENCE_PRIMARY_MODEL` optionally limits selectio
 
 Configure matching primary credentials and optional `secondary_model` / `secondary_key_file` on the relays before offering the route. Settings are private deployment configuration. Existing paired model declarations cannot change; switching to a new primary needs approved devices for that model. Do not retire devices with queued work. Deploy core, dispatcher/gateway and relay before enabling the new settings; older services cannot accept the new consent/model.
 
-New consent saves the exact optional `fallback_model`. Coupon/payment replay cannot add or change it, and the gateway rejects a receipt for an unapproved backup. Changing deployment configuration affects only new admission. Relays preserve spending/call/time limits and require NEAR encryption, attestation and signatures whenever that route is used. The optional NEAR report check remains a separate feature.
+New consent saves the exact optional `fallback_model`. Coupon/payment replay cannot add or change it, and the gateway rejects a receipt for an unapproved backup. Changing deployment configuration affects only new admission. Relays preserve spending/call/time limits and require NEAR encryption, attestation and signatures whenever that route is used.
 
 Legacy `PATCHRIOT_VENICE_FALLBACK_ENABLED=true` and `allows_venice_fallback` still support the original NEAR-to-Venice route. Do not combine that flag with the new settings. Old serialized consent and receipts are unchanged. No migration is needed.
 
